@@ -19,19 +19,20 @@ std::wstring decode_chemistry(const std::wstring& raw) {
 	return raw;
 }
 
-std::wstring decode_status(const std::wstring& raw) {
-	if (raw == L"1") return L"Other";
-	if (raw == L"2") return L"Unknown";
-	if (raw == L"3") return L"Fully Charged";
-	if (raw == L"4") return L"Low";
-	if (raw == L"5") return L"Critical";
-	if (raw == L"6") return L"Charging";
-	if (raw == L"7") return L"Charging, High";
-	if (raw == L"8") return L"Charging, Low";
-	if (raw == L"9") return L"Charging, Critical";
-	if (raw == L"10") return L"Undefined";
-	if (raw == L"11") return L"Partially Charged";
-	return raw;
+// Win32_Battery's own BatteryStatus enum is unreliable on modern hardware - confirmed on real hardware reporting 2 (Unknown) while plugged in and 1 (Other) while unplugged, neither of which reflects reality. ROOT\WMI's BatteryStatus class (same name, unrelated class - the ACPI battery driver's live status block) gives the real Charging/Discharging/PowerOnline booleans instead, the same fix already applied to capacity below.
+std::wstring live_status() {
+	try {
+		auto rows = wmi_connection::instance().query(L"SELECT Charging, Discharging, PowerOnline, Critical FROM BatteryStatus", L"ROOT\\WMI");
+		if (rows.empty()) return L"";
+		const auto& row = rows.front();
+		if (row.get(L"Critical") == L"True") return L"Critical";
+		if (row.get(L"Charging") == L"True") return L"Charging";
+		if (row.get(L"Discharging") == L"True") return L"Discharging";
+		if (row.get(L"PowerOnline") == L"True") return L"Fully Charged";
+		return L"Idle";
+	} catch (const std::exception&) {
+		return L"";
+	}
 }
 
 // EstimatedRunTime and TimeToFullCharge both use this magic value to mean "unknown" (e.g. not currently discharging/charging).
@@ -98,15 +99,16 @@ capacity_info battery_capacity_info() {
 class battery_provider : public category_provider {
 public:
 	std::vector<category_item> get_items() override {
-		auto rows = wmi_connection::instance().query(L"SELECT Name, EstimatedChargeRemaining, BatteryStatus, Chemistry, DesignVoltage, EstimatedRunTime, TimeToFullCharge FROM Win32_Battery");
+		auto rows = wmi_connection::instance().query(L"SELECT Name, EstimatedChargeRemaining, Chemistry, DesignVoltage, EstimatedRunTime, TimeToFullCharge FROM Win32_Battery");
 		std::vector<category_item> items;
+		bool single = rows.size() == 1;
 		for (const auto& row : rows) {
 			category_item item;
-			item.label = L"Battery, " + row.get(L"Name");
+			item.label = single ? L"Battery" : (L"Battery, " + row.get(L"Name"));
 			auto capacity = battery_capacity_info();
 			item.properties = {
 				{L"Charge Remaining", with_unit(row.get(L"EstimatedChargeRemaining"), L"%")},
-				{L"Status", decode_status(row.get(L"BatteryStatus"))},
+				{L"Status", live_status()},
 				{L"Battery Health", capacity.health_percent},
 				{L"Chemistry", decode_chemistry(row.get(L"Chemistry"))},
 				{L"Design Voltage", format_mv_as_v(row.get(L"DesignVoltage"))},

@@ -50,6 +50,8 @@ std::wstring variant_to_wstring(const VARIANT& var) {
 	if (var.vt == VT_NULL || var.vt == VT_EMPTY) return L"";
 	if (var.vt & VT_ARRAY) return variant_array_to_wstring(var);
 	if (var.vt == VT_BSTR) return var.bstrVal ? std::wstring(var.bstrVal) : L"";
+	// VariantChangeType would convert this to "-1"/"0" (its default numeric rendering of VARIANT_BOOL), not readable text - handle it explicitly instead.
+	if (var.vt == VT_BOOL) return var.boolVal ? L"True" : L"False";
 	VARIANT src = var;  // shallow copy: VariantChangeType only writes to dest.
 	VARIANT dest;
 	VariantInit(&dest);
