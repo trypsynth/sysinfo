@@ -19,8 +19,8 @@ std::wstring decode_chemistry(const std::wstring& raw) {
 	return raw;
 }
 
-// Win32_Battery's own BatteryStatus enum is unreliable on modern hardware - confirmed on real hardware reporting 2 (Unknown) while plugged in and 1 (Other) while unplugged, neither of which reflects reality. ROOT\WMI's BatteryStatus class (same name, unrelated class - the ACPI battery driver's live status block) gives the real Charging/Discharging/PowerOnline booleans instead, the same fix already applied to capacity below.
-std::wstring live_status() {
+// Win32_Battery's own BatteryStatus enum is unreliable on modern hardware, confirmed reporting 2 (Unknown) while plugged in and 1 (Other) while unplugged, neither of which reflects reality. ROOT\WMI's BatteryStatus class (same name, unrelated class, the ACPI battery driver's live status block) gives the real Charging/Discharging/PowerOnline booleans instead, the same fix already applied to capacity below. Plugged in with neither flag set usually means fully charged, but not always, some laptops cap charging below 100 percent for battery health, so that case is cross checked against the actual charge percentage rather than assumed.
+std::wstring live_status(const std::wstring& charge_remaining) {
 	try {
 		auto rows = wmi_connection::instance().query(L"SELECT Charging, Discharging, PowerOnline, Critical FROM BatteryStatus", L"ROOT\\WMI");
 		if (rows.empty()) return L"";
@@ -28,7 +28,13 @@ std::wstring live_status() {
 		if (row.get(L"Critical") == L"True") return L"Critical";
 		if (row.get(L"Charging") == L"True") return L"Charging";
 		if (row.get(L"Discharging") == L"True") return L"Discharging";
-		if (row.get(L"PowerOnline") == L"True") return L"Fully Charged";
+		if (row.get(L"PowerOnline") == L"True") {
+			try {
+				if (!charge_remaining.empty() && std::stod(charge_remaining) >= 99.0) return L"Fully Charged";
+			} catch (const std::exception&) {
+			}
+			return L"Plugged In";
+		}
 		return L"Idle";
 	} catch (const std::exception&) {
 		return L"";
@@ -108,7 +114,7 @@ public:
 			auto capacity = battery_capacity_info();
 			item.properties = {
 				{L"Charge Remaining", with_unit(row.get(L"EstimatedChargeRemaining"), L"%")},
-				{L"Status", live_status()},
+				{L"Status", live_status(row.get(L"EstimatedChargeRemaining"))},
 				{L"Battery Health", capacity.health_percent},
 				{L"Chemistry", decode_chemistry(row.get(L"Chemistry"))},
 				{L"Design Voltage", format_mv_as_v(row.get(L"DesignVoltage"))},
