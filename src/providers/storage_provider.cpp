@@ -7,27 +7,38 @@
 #include <unordered_set>
 
 namespace {
-std::wstring percent_free(const std::wstring& size_str, const std::wstring& free_str) {
-	if (size_str.empty() || free_str.empty()) return L"";
-	try {
-		unsigned long long size = std::stoull(size_str);
-		unsigned long long free = std::stoull(free_str);
-		if (size == 0) return L"";
-		wchar_t buf[16];
-		swprintf(buf, 16, L"%.0f%%", (static_cast<double>(free) / static_cast<double>(size)) * 100.0);
-		return buf;
-	} catch (const std::exception&) {
-		return L"";
-	}
+std::wstring percent_of(unsigned long long part, unsigned long long whole) {
+	if (whole == 0) return L"";
+	wchar_t buf[16];
+	swprintf(buf, 16, L"%.0f%%", (static_cast<double>(part) / static_cast<double>(whole)) * 100.0);
+	return buf;
 }
 
-std::wstring used_space(const std::wstring& size_str, const std::wstring& free_str) {
+std::wstring used_space_with_percent(const std::wstring& size_str, const std::wstring& free_str) {
 	if (size_str.empty() || free_str.empty()) return L"";
 	try {
 		unsigned long long size = std::stoull(size_str);
 		unsigned long long free = std::stoull(free_str);
 		if (free > size) return L"";
-		return format_bytes_as_gb(std::to_wstring(size - free));
+		unsigned long long used = size - free;
+		std::wstring result = format_bytes_as_gb(std::to_wstring(used));
+		std::wstring pct = percent_of(used, size);
+		if (!pct.empty()) result += L" (" + pct + L")";
+		return result;
+	} catch (const std::exception&) {
+		return L"";
+	}
+}
+
+std::wstring free_space_with_percent(const std::wstring& size_str, const std::wstring& free_str) {
+	if (size_str.empty() || free_str.empty()) return L"";
+	try {
+		unsigned long long size = std::stoull(size_str);
+		unsigned long long free = std::stoull(free_str);
+		std::wstring result = format_bytes_as_gb(free_str);
+		std::wstring pct = percent_of(free, size);
+		if (!pct.empty()) result += L" (" + pct + L")";
+		return result;
 	} catch (const std::exception&) {
 		return L"";
 	}
@@ -43,7 +54,7 @@ std::wstring escape_wql(const std::wstring& value) {
 	return result;
 }
 
-// There's no direct link between Win32_DiskDrive (physical disks) and Win32_LogicalDisk (drive letters) - a disk can hold several partitions, each hosting a volume - so this walks the real association chain: disk -> its partitions -> each partition's logical disk.
+// There's no direct link between Win32_DiskDrive (physical disks) and Win32_LogicalDisk (drive letters), a disk can hold several partitions, each hosting a volume, so this walks the real association chain: disk to its partitions to each partition's logical disk.
 std::vector<wmi_row> volumes_on_disk(const std::wstring& disk_device_id) {
 	std::vector<wmi_row> volumes;
 	if (disk_device_id.empty()) return volumes;
@@ -58,15 +69,14 @@ std::vector<wmi_row> volumes_on_disk(const std::wstring& disk_device_id) {
 	return volumes;
 }
 
-// prefix disambiguates when a disk has more than one volume (e.g. "C: Free Space", "D: Free Space"); left empty for the common single-volume case, and when total_size is requested that's shown too (only needed for the no-matching-disk fallback item, since the merged-into-a-disk case already has the physical disk's own Size).
-void append_volume_properties(category_item& item, const wmi_row& volume, const std::wstring& prefix, bool total_size) {
+// prefix disambiguates when a disk has more than one volume (e.g. "C: Total Size", "D: Total Size"); left empty for the common single-volume case.
+void append_volume_properties(category_item& item, const wmi_row& volume, const std::wstring& prefix) {
 	std::wstring size = volume.get(L"Size");
 	std::wstring free = volume.get(L"FreeSpace");
+	item.properties.push_back({prefix + L"Total Size", format_bytes_as_gb(size)});
+	item.properties.push_back({prefix + L"Used Space", used_space_with_percent(size, free)});
+	item.properties.push_back({prefix + L"Free Space", free_space_with_percent(size, free)});
 	item.properties.push_back({prefix + L"File System", volume.get(L"FileSystem")});
-	if (total_size) item.properties.push_back({prefix + L"Total Size", format_bytes_as_gb(size)});
-	item.properties.push_back({prefix + L"Free Space", format_bytes_as_gb(free)});
-	item.properties.push_back({prefix + L"Used Space", used_space(size, free)});
-	item.properties.push_back({prefix + L"Percent Free", percent_free(size, free)});
 }
 }  // namespace
 
@@ -76,20 +86,23 @@ public:
 		std::vector<category_item> items;
 		std::unordered_set<std::wstring> consumed_volumes;
 
-		auto disk_rows = wmi_connection::instance().query(L"SELECT DeviceID, Caption, Model, InterfaceType, MediaType, Size, SerialNumber, Partitions, Status, FirmwareRevision FROM Win32_DiskDrive");
+		auto disk_rows = wmi_connection::instance().query(L"SELECT DeviceID, Caption, Model, InterfaceType, MediaType, SerialNumber, Partitions, Status, FirmwareRevision FROM Win32_DiskDrive");
 		for (const auto& row : disk_rows) {
 			category_item item;
 			item.label = L"Storage, " + row.get(L"Caption");
-			item.properties = {{L"Model", row.get(L"Model")}, {L"Interface", row.get(L"InterfaceType")}, {L"Media Type", row.get(L"MediaType")}, {L"Size", format_bytes_as_gb(row.get(L"Size"))}, {L"Partitions", row.get(L"Partitions")}, {L"Health Status", row.get(L"Status")}, {L"Firmware Revision", row.get(L"FirmwareRevision")}};
+			item.properties = {{L"Model", row.get(L"Model")}, {L"Interface", row.get(L"InterfaceType")}, {L"Media Type", row.get(L"MediaType")}};
 
 			auto volumes = volumes_on_disk(row.get(L"DeviceID"));
 			bool single = volumes.size() == 1;
 			for (const auto& volume : volumes) {
 				std::wstring device_id = volume.get(L"DeviceID");
 				consumed_volumes.insert(device_id);
-				append_volume_properties(item, volume, single ? L"" : (device_id + L" "), false);
+				append_volume_properties(item, volume, single ? L"" : (device_id + L" "));
 			}
 
+			item.properties.push_back({L"Partitions", row.get(L"Partitions")});
+			item.properties.push_back({L"Health Status", row.get(L"Status")});
+			item.properties.push_back({L"Firmware Revision", row.get(L"FirmwareRevision")});
 			item.properties.push_back({L"Serial Number", row.get(L"SerialNumber")});
 			items.push_back(std::move(item));
 		}
@@ -101,11 +114,11 @@ public:
 			std::wstring volume_name = row.get(L"VolumeName");
 			category_item item;
 			item.label = L"Storage, " + device_id + (volume_name.empty() ? L"" : L" (" + volume_name + L")");
-			append_volume_properties(item, row, L"", true);
+			append_volume_properties(item, row, L"");
 			items.push_back(std::move(item));
 		}
 
-		// With just one drive there's nothing to tell it apart from, so the model/drive-letter suffix is just noise in the category list - drop it there (it's still in the properties as Model).
+		// With just one drive there's nothing to tell it apart from, so the model or drive letter suffix is just noise in the category list, drop it there (it's still in the properties as Model).
 		if (items.size() == 1) items.front().label = L"Storage";
 
 		return items;
