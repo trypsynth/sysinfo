@@ -1,0 +1,9 @@
+build*/
+.cache/
+.vs/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
