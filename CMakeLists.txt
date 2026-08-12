@@ -22,7 +22,6 @@ add_executable(sysinfo WIN32
 	src/main_window.cpp
 	src/core/provider_registry.cpp
 	src/core/format.cpp
-	src/core/duration.cpp
 	src/wmi/wmi_connection.cpp
 	src/wmi/wmi_row.cpp
 	src/wmi/wmi_date_time.cpp

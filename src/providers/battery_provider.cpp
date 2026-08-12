@@ -1,5 +1,4 @@
 #include "core/category_provider.hpp"
-#include "core/duration.hpp"
 #include "core/format.hpp"
 #include "core/provider_registry.hpp"
 #include "wmi/wmi_connection.hpp"
@@ -88,13 +87,7 @@ capacity_info battery_capacity_info() {
 		std::wstring design_raw = design_rows.front().get(L"DesignedCapacity");
 		std::wstring full_raw = full_rows.front().get(L"FullChargedCapacity");
 		capacity_info info{format_mwh_as_wh(design_raw), format_mwh_as_wh(full_raw), L""};
-		double design = std::stod(design_raw);
-		double full = std::stod(full_raw);
-		if (design > 0.0) {
-			wchar_t buf[16];
-			swprintf(buf, 16, L"%.0f%%", (full / design) * 100.0);
-			info.health_percent = buf;
-		}
+		info.health_percent = format_percent(std::stod(full_raw), std::stod(design_raw));
 		return info;
 	} catch (const std::exception&) {
 		return {};

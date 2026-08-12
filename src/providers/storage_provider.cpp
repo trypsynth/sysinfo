@@ -2,18 +2,10 @@
 #include "core/format.hpp"
 #include "core/provider_registry.hpp"
 #include "wmi/wmi_connection.hpp"
-#include <cwchar>
 #include <exception>
 #include <unordered_set>
 
 namespace {
-std::wstring percent_of(unsigned long long part, unsigned long long whole) {
-	if (whole == 0) return L"";
-	wchar_t buf[16];
-	swprintf(buf, 16, L"%.0f%%", (static_cast<double>(part) / static_cast<double>(whole)) * 100.0);
-	return buf;
-}
-
 std::wstring used_space_with_percent(const std::wstring& size_str, const std::wstring& free_str) {
 	if (size_str.empty() || free_str.empty()) return L"";
 	try {
@@ -21,8 +13,8 @@ std::wstring used_space_with_percent(const std::wstring& size_str, const std::ws
 		unsigned long long free = std::stoull(free_str);
 		if (free > size) return L"";
 		unsigned long long used = size - free;
-		std::wstring result = format_bytes_as_gb(std::to_wstring(used));
-		std::wstring pct = percent_of(used, size);
+		std::wstring result = format_bytes(std::to_wstring(used));
+		std::wstring pct = format_percent(static_cast<double>(used), static_cast<double>(size));
 		if (!pct.empty()) result += L" (" + pct + L")";
 		return result;
 	} catch (const std::exception&) {
@@ -35,8 +27,8 @@ std::wstring free_space_with_percent(const std::wstring& size_str, const std::ws
 	try {
 		unsigned long long size = std::stoull(size_str);
 		unsigned long long free = std::stoull(free_str);
-		std::wstring result = format_bytes_as_gb(free_str);
-		std::wstring pct = percent_of(free, size);
+		std::wstring result = format_bytes(free_str);
+		std::wstring pct = format_percent(static_cast<double>(free), static_cast<double>(size));
 		if (!pct.empty()) result += L" (" + pct + L")";
 		return result;
 	} catch (const std::exception&) {
@@ -73,7 +65,7 @@ std::vector<wmi_row> volumes_on_disk(const std::wstring& disk_device_id) {
 void append_volume_properties(category_item& item, const wmi_row& volume, const std::wstring& prefix) {
 	std::wstring size = volume.get(L"Size");
 	std::wstring free = volume.get(L"FreeSpace");
-	item.properties.push_back({prefix + L"Total Size", format_bytes_as_gb(size)});
+	item.properties.push_back({prefix + L"Total Size", format_bytes(size)});
 	item.properties.push_back({prefix + L"Used Space", used_space_with_percent(size, free)});
 	item.properties.push_back({prefix + L"Free Space", free_space_with_percent(size, free)});
 	item.properties.push_back({prefix + L"File System", volume.get(L"FileSystem")});

@@ -1,5 +1,5 @@
 #include "core/category_provider.hpp"
-#include "core/duration.hpp"
+#include "core/format.hpp"
 #include "core/provider_registry.hpp"
 #include "wmi/wmi_connection.hpp"
 #include "wmi/wmi_date_time.hpp"

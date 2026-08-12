@@ -11,7 +11,7 @@ public:
 		for (const auto& row : rows) {
 			category_item item;
 			item.label = L"GPU, " + row.get(L"Name");
-			item.properties = {{L"Vendor", row.get(L"AdapterCompatibility")}, {L"Driver Version", row.get(L"DriverVersion")}, {L"Refresh Rate", with_unit(row.get(L"CurrentRefreshRate"), L" Hz")}, {L"Video Memory", format_bytes_as_gb(row.get(L"AdapterRAM"))}};
+			item.properties = {{L"Vendor", row.get(L"AdapterCompatibility")}, {L"Driver Version", row.get(L"DriverVersion")}, {L"Refresh Rate", with_unit(row.get(L"CurrentRefreshRate"), L" Hz")}, {L"Video Memory", format_bytes(row.get(L"AdapterRAM"))}};
 			std::wstring width = row.get(L"CurrentHorizontalResolution");
 			std::wstring height = row.get(L"CurrentVerticalResolution");
 			if (!width.empty() && !height.empty()) item.properties.push_back({L"Current Resolution", width + L" x " + height});

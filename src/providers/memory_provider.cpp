@@ -6,7 +6,7 @@
 #include <windows.h>
 
 namespace {
-std::wstring format_kb_as_gb(unsigned long long kb) { return format_bytes_as_gb(std::to_wstring(kb * 1024ULL)); }
+std::wstring format_kb_as_gb(unsigned long long kb) { return format_bytes(std::to_wstring(kb * 1024ULL)); }
 
 // SMBIOSMemoryType is a raw SMBIOS Memory Device Type byte; Microsoft's own docs only officially list values up to 26 (DDR4), but real hardware reports the newer SMBIOS-spec values for DDR5 and beyond too. 0 (Unknown) and anything not confidently mapped falls through to "", which the existing blank-property filtering drops.
 std::wstring decode_memory_type(const std::wstring& raw) {
@@ -73,7 +73,7 @@ public:
 			category_item item;
 			std::wstring locator = row.get(L"DeviceLocator");
 			item.label = L"Memory, " + (locator.empty() ? L"Module" : locator);
-			item.properties = {{L"Bank", row.get(L"BankLabel")}, {L"Type", decode_memory_type(row.get(L"SMBIOSMemoryType"))}, {L"Form Factor", decode_form_factor(row.get(L"FormFactor"))}, {L"Capacity", format_bytes_as_gb(row.get(L"Capacity"))}, {L"Speed", with_unit(row.get(L"Speed"), L" MHz")}, {L"Manufacturer", row.get(L"Manufacturer")}};
+			item.properties = {{L"Bank", row.get(L"BankLabel")}, {L"Type", decode_memory_type(row.get(L"SMBIOSMemoryType"))}, {L"Form Factor", decode_form_factor(row.get(L"FormFactor"))}, {L"Capacity", format_bytes(row.get(L"Capacity"))}, {L"Speed", with_unit(row.get(L"Speed"), L" MHz")}, {L"Manufacturer", row.get(L"Manufacturer")}};
 			items.push_back(std::move(item));
 		}
 		return items;
