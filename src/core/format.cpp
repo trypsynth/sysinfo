@@ -46,7 +46,7 @@ std::wstring with_unit(const std::wstring& value, const std::wstring& suffix) {
 std::wstring format_percent(double part, double whole) {
 	if (whole <= 0.0) return L"";
 	wchar_t buf[16];
-	swprintf(buf, 16, L"%.1f%%", (part / whole) * 100.0);
+	swprintf(buf, 16, L"%.2f%%", (part / whole) * 100.0);
 	return buf;
 }
 
