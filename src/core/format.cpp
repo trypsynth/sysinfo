@@ -32,7 +32,7 @@ std::wstring format_bytes(const std::wstring& bytes_str) {
 			++unit_index;
 		}
 		wchar_t buf[64];
-		swprintf(buf, 64, L"%.1f %ls", value, units[unit_index]);
+		swprintf(buf, 64, L"%.2f %ls", value, units[unit_index]);
 		return buf;
 	} catch (const std::exception&) {
 		return bytes_str;
