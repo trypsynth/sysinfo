@@ -1,9 +1,4 @@
-build*/
-.cache/
-.vs/
-*.obj
+zig-out/
+.zig-cache/
 *.exe
 *.pdb
-*.ilk
-*.exp
-*.lib
