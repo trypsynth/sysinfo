@@ -36,6 +36,22 @@ fn escapeWql(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
 	return result.toOwnedSlice(allocator);
 }
 
+fn decodePhysicalDiskMediaType(raw: []const u8) []const u8 {
+	if (std.mem.eql(u8, raw, "3")) return "HDD";
+	if (std.mem.eql(u8, raw, "4")) return "SSD";
+	if (std.mem.eql(u8, raw, "5")) return "SCM";
+	return "";
+}
+
+/// Win32_DiskDrive.MediaType is almost always just "Fixed hard disk media" for both SSDs and HDDs, it doesn't actually distinguish them. MSFT_PhysicalDisk (the newer Storage Management WMI provider) does, matched up here by disk index since that's what MSFT_PhysicalDisk.DeviceId holds. Falls back to "" if the provider isn't available (older Windows).
+fn driveType(allocator: std.mem.Allocator, physical_disks: []const wmi.WmiRow, disk_index: []const u8) ![]const u8 {
+	for (physical_disks) |*disk| {
+		if (!std.mem.eql(u8, try disk.get(allocator, "DeviceId"), disk_index)) continue;
+		return decodePhysicalDiskMediaType(try disk.get(allocator, "MediaType"));
+	}
+	return "";
+}
+
 /// There's no direct link between Win32_DiskDrive (physical disks) and Win32_LogicalDisk (drive letters), a disk can hold several partitions, each hosting a volume, so this walks the real association chain (disk to its partitions to each partition's logical disk).
 fn volumesOnDisk(allocator: std.mem.Allocator, conn: *wmi.WmiConnection, disk_device_id: []const u8) ![]wmi.WmiRow {
 	var volumes = std.ArrayList(wmi.WmiRow).empty;
@@ -65,14 +81,17 @@ pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	var items = std.ArrayList(CategoryItem).empty;
 	var consumed_volumes = std.StringHashMap(void).init(allocator);
-	const disk_rows = try conn.query(allocator, "SELECT DeviceID, Caption, Model, InterfaceType, MediaType, SerialNumber, Partitions, Status, FirmwareRevision FROM Win32_DiskDrive", "ROOT\\CIMV2");
+	const disk_rows = try conn.query(allocator, "SELECT DeviceID, Caption, Model, InterfaceType, MediaType, SerialNumber, Partitions, Status, FirmwareRevision, Index FROM Win32_DiskDrive", "ROOT\\CIMV2");
 	defer for (disk_rows) |*row| row.deinit();
+	const physical_disks = conn.query(allocator, "SELECT DeviceId, MediaType FROM MSFT_PhysicalDisk", "ROOT\\Microsoft\\Windows\\Storage") catch &.{};
+	defer for (physical_disks) |*row| row.deinit();
 	for (disk_rows) |*row| {
 		const label = try std.mem.concat(allocator, u8, &.{ "Storage, ", try row.get(allocator, "Caption") });
 		var properties = std.ArrayList(PropertyRow).empty;
 		try properties.append(allocator, .{ .name = "Model", .value = try row.get(allocator, "Model") });
 		try properties.append(allocator, .{ .name = "Interface", .value = try row.get(allocator, "InterfaceType") });
 		try properties.append(allocator, .{ .name = "Media Type", .value = try row.get(allocator, "MediaType") });
+		try properties.append(allocator, .{ .name = "Drive Type", .value = try driveType(allocator, physical_disks, try row.get(allocator, "Index")) });
 		const volumes = try volumesOnDisk(allocator, conn, try row.get(allocator, "DeviceID"));
 		defer for (volumes) |*v| v.deinit();
 		const single = volumes.len == 1;
