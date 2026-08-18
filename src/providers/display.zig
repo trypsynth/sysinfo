@@ -71,12 +71,19 @@ fn enumerateLiveDisplays(allocator: std.mem.Allocator) ![]LiveDisplayInfo {
 	return result.toOwnedSlice(allocator);
 }
 
+/// VideoInputType on WmiMonitorBasicDisplayParams is the EDID basic display parameters input flag: 0 = analog (VGA), 1 = digital (DVI/HDMI/DisplayPort/eDP etc).
+fn decodeVideoInputType(raw: []const u8) []const u8 {
+	if (std.mem.eql(u8, raw, "0")) return "Analog";
+	if (std.mem.eql(u8, raw, "1")) return "Digital";
+	return "";
+}
+
 /// Win32_DesktopMonitor (ROOT\CIMV2) is almost always sparse on modern hardware (blank manufacturer, blank resolution). WmiMonitorID/WmiMonitorBasicDisplayParams (ROOT\WMI, exposed by the monitor class driver from the panel's own EDID) give real identity and physical size instead, EnumDisplayDevices/EnumDisplaySettings (native Win32, no WMI involved) give the actual live resolution and refresh rate.
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const id_rows = try conn.query(allocator, "SELECT InstanceName, UserFriendlyName, ManufacturerName, SerialNumberID, WeekOfManufacture, YearOfManufacture FROM WmiMonitorID", "ROOT\\WMI");
 	defer for (id_rows) |*row| row.deinit();
-	const size_rows = conn.query(allocator, "SELECT InstanceName, MaxHorizontalImageSize, MaxVerticalImageSize FROM WmiMonitorBasicDisplayParams", "ROOT\\WMI") catch &.{};
+	const size_rows = conn.query(allocator, "SELECT InstanceName, MaxHorizontalImageSize, MaxVerticalImageSize, VideoInputType FROM WmiMonitorBasicDisplayParams", "ROOT\\WMI") catch &.{};
 	defer for (size_rows) |*row| row.deinit();
 	const live_displays = try enumerateLiveDisplays(allocator);
 	var items = std.ArrayList(CategoryItem).empty;
@@ -106,6 +113,7 @@ pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 			if (!std.mem.eql(u8, size_instance, instance_name)) continue;
 			const size = try screenSizeInches(allocator, try size_row.get(allocator, "MaxHorizontalImageSize"), try size_row.get(allocator, "MaxVerticalImageSize"));
 			if (size.len > 0) try properties.append(allocator, .{ .name = "Screen Size", .value = size });
+			try properties.append(allocator, .{ .name = "Input Type", .value = decodeVideoInputType(try size_row.get(allocator, "VideoInputType")) });
 			break;
 		}
 		try items.append(allocator, .{ .label = label, .properties = try properties.toOwnedSlice(allocator) });

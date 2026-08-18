@@ -7,7 +7,7 @@ const PropertyRow = category_item.PropertyRow;
 
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
-	const rows = try conn.query(allocator, "SELECT Name, AdapterCompatibility, DriverVersion, CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate, AdapterRAM FROM Win32_VideoController", "ROOT\\CIMV2");
+	const rows = try conn.query(allocator, "SELECT Name, AdapterCompatibility, VideoProcessor, DriverVersion, DriverDate, CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate, CurrentBitsPerPixel, AdapterRAM, Status FROM Win32_VideoController", "ROOT\\CIMV2");
 	defer for (rows) |*row| row.deinit();
 	var items = std.ArrayList(CategoryItem).empty;
 	for (rows) |*row| {
@@ -16,8 +16,12 @@ pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 		var properties = std.ArrayList(PropertyRow).empty;
 		try properties.append(allocator, .{ .name = "Name", .value = name });
 		try properties.append(allocator, .{ .name = "Vendor", .value = try row.get(allocator, "AdapterCompatibility") });
+		try properties.append(allocator, .{ .name = "Video Processor", .value = try row.get(allocator, "VideoProcessor") });
 		try properties.append(allocator, .{ .name = "Driver Version", .value = try row.get(allocator, "DriverVersion") });
+		try properties.append(allocator, .{ .name = "Driver Date", .value = try wmi.formatWmiDateTime(allocator, try row.get(allocator, "DriverDate")) });
+		try properties.append(allocator, .{ .name = "Status", .value = try row.get(allocator, "Status") });
 		try properties.append(allocator, .{ .name = "Refresh Rate", .value = try format.withUnit(allocator, try row.get(allocator, "CurrentRefreshRate"), " Hz") });
+		try properties.append(allocator, .{ .name = "Color Depth", .value = try format.withUnit(allocator, try row.get(allocator, "CurrentBitsPerPixel"), "-bit") });
 		try properties.append(allocator, .{ .name = "Video Memory", .value = try format.formatBytes(allocator, try row.get(allocator, "AdapterRAM")) });
 		const width = try row.get(allocator, "CurrentHorizontalResolution");
 		const height = try row.get(allocator, "CurrentVerticalResolution");

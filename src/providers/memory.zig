@@ -41,6 +41,17 @@ fn decodeFormFactor(raw: []const u8) []const u8 {
 	return "";
 }
 
+/// PartNumber/SerialNumber on Win32_PhysicalMemory are fixed length SPD fields, space padded on the right by the SMBIOS table itself, not by WMI.
+fn trimTrailingSpaces(raw: []const u8) []const u8 {
+	return std.mem.trimEnd(u8, raw, " ");
+}
+
+fn formatMvAsV(allocator: std.mem.Allocator, mv_str: []const u8) ![]const u8 {
+	if (mv_str.len == 0) return "";
+	const mv = std.fmt.parseFloat(f64, mv_str) catch return "";
+	return std.fmt.allocPrint(allocator, "{d:.2} V", .{mv / 1000.0});
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	var items = std.ArrayList(CategoryItem).empty;
@@ -60,20 +71,26 @@ pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 		if (std.fmt.parseUnsigned(u64, free_str, 10) catch null) |free_kb| try summary_properties.append(allocator, .{ .name = "Free", .value = try formatKbAsGb(allocator, free_kb) });
 	}
 	try items.append(allocator, .{ .label = "Memory, Summary", .properties = try summary_properties.toOwnedSlice(allocator) });
-	const module_rows = try conn.query(allocator, "SELECT DeviceLocator, BankLabel, Capacity, Speed, Manufacturer, SMBIOSMemoryType, FormFactor FROM Win32_PhysicalMemory", "ROOT\\CIMV2");
+	const module_rows = try conn.query(allocator, "SELECT DeviceLocator, BankLabel, Capacity, Speed, ConfiguredClockSpeed, ConfiguredVoltage, Manufacturer, PartNumber, SerialNumber, SMBIOSMemoryType, FormFactor FROM Win32_PhysicalMemory", "ROOT\\CIMV2");
 	defer for (module_rows) |*row| row.deinit();
 	for (module_rows) |*row| {
 		const locator = try row.get(allocator, "DeviceLocator");
 		const label = if (locator.len == 0) "Memory, Module" else try std.mem.concat(allocator, u8, &.{ "Memory, ", locator });
-		const properties = try allocator.dupe(PropertyRow, &.{
-			.{ .name = "Bank", .value = try row.get(allocator, "BankLabel") },
-			.{ .name = "Type", .value = decodeMemoryType(try row.get(allocator, "SMBIOSMemoryType")) },
-			.{ .name = "Form Factor", .value = decodeFormFactor(try row.get(allocator, "FormFactor")) },
-			.{ .name = "Capacity", .value = try format.formatBytes(allocator, try row.get(allocator, "Capacity")) },
-			.{ .name = "Speed", .value = try format.withUnit(allocator, try row.get(allocator, "Speed"), " MHz") },
-			.{ .name = "Manufacturer", .value = try row.get(allocator, "Manufacturer") },
-		});
-		try items.append(allocator, .{ .label = label, .properties = properties });
+		const rated_speed = try row.get(allocator, "Speed");
+		const configured_speed = try row.get(allocator, "ConfiguredClockSpeed");
+		var properties = std.ArrayList(PropertyRow).empty;
+		try properties.append(allocator, .{ .name = "Bank", .value = try row.get(allocator, "BankLabel") });
+		try properties.append(allocator, .{ .name = "Type", .value = decodeMemoryType(try row.get(allocator, "SMBIOSMemoryType")) });
+		try properties.append(allocator, .{ .name = "Form Factor", .value = decodeFormFactor(try row.get(allocator, "FormFactor")) });
+		try properties.append(allocator, .{ .name = "Capacity", .value = try format.formatBytes(allocator, try row.get(allocator, "Capacity")) });
+		try properties.append(allocator, .{ .name = "Rated Speed", .value = try format.withUnit(allocator, rated_speed, " MHz") });
+		// Only shown when it differs from the rated speed, e.g. XMP/EXPO not enabled so the module is running below spec.
+		if (configured_speed.len > 0 and !std.mem.eql(u8, configured_speed, rated_speed)) try properties.append(allocator, .{ .name = "Configured Speed", .value = try format.withUnit(allocator, configured_speed, " MHz") });
+		try properties.append(allocator, .{ .name = "Voltage", .value = try formatMvAsV(allocator, try row.get(allocator, "ConfiguredVoltage")) });
+		try properties.append(allocator, .{ .name = "Manufacturer", .value = try row.get(allocator, "Manufacturer") });
+		try properties.append(allocator, .{ .name = "Part Number", .value = trimTrailingSpaces(try row.get(allocator, "PartNumber")) });
+		try properties.append(allocator, .{ .name = "Serial Number", .value = trimTrailingSpaces(try row.get(allocator, "SerialNumber")) });
+		try items.append(allocator, .{ .label = label, .properties = try properties.toOwnedSlice(allocator) });
 	}
 	return items.toOwnedSlice(allocator);
 }

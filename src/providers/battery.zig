@@ -58,11 +58,24 @@ const CapacityInfo = struct {
 	design_wh: []const u8 = "",
 	full_wh: []const u8 = "",
 	health_percent: []const u8 = "",
+	manufacturer: []const u8 = "",
+	serial_number: []const u8 = "",
+	manufacture_date: []const u8 = "",
 };
 
-/// DesignedCapacity/FullChargedCapacity live in ROOT\WMI (exposed by the ACPI battery driver), not Win32_Battery's own DesignCapacity/FullChargeCapacity fields (which are almost always unpopulated on real hardware). Assumes a single battery, like the rest of this provider. Falls back to all blank if either class is unavailable.
+/// ManufactureDate is a packed FAT style date (not a CIM_DATETIME string): bits 0-4 day, bits 5-8 month, bits 9-15 year offset from 1980. Same packing SMBIOS itself uses for this field.
+fn decodeFatDate(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
+	const value = std.fmt.parseUnsigned(u16, raw, 10) catch return "";
+	const day = value & 0x1f;
+	const month = (value >> 5) & 0xf;
+	const year = 1980 + (value >> 9);
+	if (day == 0 or month == 0) return "";
+	return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, month, day });
+}
+
+/// DesignedCapacity/FullChargedCapacity/ManufactureName/SerialNumber/ManufactureDate live in ROOT\WMI (exposed by the ACPI battery driver), not Win32_Battery's own equivalents (which are almost always unpopulated on real hardware, or in SerialNumber's case a plain integer rather than the vendor's actual serial string). Assumes a single battery, like the rest of this provider. Falls back to all blank if either class is unavailable.
 fn batteryCapacityInfo(allocator: std.mem.Allocator, conn: *wmi.WmiConnection) !CapacityInfo {
-	const design_rows = conn.query(allocator, "SELECT DesignedCapacity FROM BatteryStaticData", "ROOT\\WMI") catch return .{};
+	const design_rows = conn.query(allocator, "SELECT DesignedCapacity, ManufactureName, SerialNumber, ManufactureDate FROM BatteryStaticData", "ROOT\\WMI") catch return .{};
 	defer for (design_rows) |*row| row.deinit();
 	const full_rows = conn.query(allocator, "SELECT FullChargedCapacity FROM BatteryFullChargedCapacity", "ROOT\\WMI") catch return .{};
 	defer for (full_rows) |*row| row.deinit();
@@ -71,7 +84,22 @@ fn batteryCapacityInfo(allocator: std.mem.Allocator, conn: *wmi.WmiConnection) !
 	const full_raw = try full_rows[0].get(allocator, "FullChargedCapacity");
 	const design_val = std.fmt.parseFloat(f64, design_raw) catch return .{};
 	const full_val = std.fmt.parseFloat(f64, full_raw) catch return .{};
-	return .{ .design_wh = try formatMwhAsWh(allocator, design_raw), .full_wh = try formatMwhAsWh(allocator, full_raw), .health_percent = try format.formatPercent(allocator, full_val, design_val) };
+	return .{
+		.design_wh = try formatMwhAsWh(allocator, design_raw),
+		.full_wh = try formatMwhAsWh(allocator, full_raw),
+		.health_percent = try format.formatPercent(allocator, full_val, design_val),
+		.manufacturer = try design_rows[0].get(allocator, "ManufactureName"),
+		.serial_number = try design_rows[0].get(allocator, "SerialNumber"),
+		.manufacture_date = try decodeFatDate(allocator, try design_rows[0].get(allocator, "ManufactureDate")),
+	};
+}
+
+/// BatteryCycleCount is its own ROOT\WMI class, not on Win32_Battery or BatteryStaticData.
+fn batteryCycleCount(allocator: std.mem.Allocator, conn: *wmi.WmiConnection) ![]const u8 {
+	const rows = conn.query(allocator, "SELECT CycleCount FROM BatteryCycleCount", "ROOT\\WMI") catch return "";
+	defer for (rows) |*row| row.deinit();
+	if (rows.len == 0) return "";
+	return rows[0].get(allocator, "CycleCount");
 }
 
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
@@ -92,8 +120,12 @@ pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 			.{ .name = "Design Voltage", .value = try formatMvAsV(allocator, try row.get(allocator, "DesignVoltage")) },
 			.{ .name = "Design Capacity", .value = capacity.design_wh },
 			.{ .name = "Full Charge Capacity", .value = capacity.full_wh },
+			.{ .name = "Cycle Count", .value = try batteryCycleCount(allocator, conn) },
 			.{ .name = "Estimated Time Remaining", .value = try formatMinutes(allocator, try row.get(allocator, "EstimatedRunTime")) },
 			.{ .name = "Time to Full Charge", .value = try formatMinutes(allocator, try row.get(allocator, "TimeToFullCharge")) },
+			.{ .name = "Manufacturer", .value = capacity.manufacturer },
+			.{ .name = "Manufacture Date", .value = capacity.manufacture_date },
+			.{ .name = "Serial Number", .value = capacity.serial_number },
 		});
 		try items.append(allocator, .{ .label = label, .properties = properties });
 	}

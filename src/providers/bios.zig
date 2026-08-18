@@ -22,22 +22,44 @@ fn secureBootStatus() []const u8 {
 	return if (value != 0) "Enabled" else "Disabled";
 }
 
+/// TPM lives in its own dedicated WMI namespace (only present when a TPM is enumerated at all), so it's queried and appended separately from the rest of BIOS/firmware info, rather than failing the whole category when it's unavailable (e.g. TPM disabled in firmware, or a VM with no virtual TPM).
+fn appendTpmInfo(allocator: std.mem.Allocator, conn: *wmi.WmiConnection, properties: *std.ArrayList(PropertyRow)) !void {
+	const rows = conn.query(allocator, "SELECT SpecVersion, IsEnabled_InitialValue, IsActivated_InitialValue FROM Win32_Tpm", "ROOT\\CIMV2\\Security\\MicrosoftTpm") catch return;
+	defer for (rows) |*row| row.deinit();
+	if (rows.len == 0) return;
+	const row = &rows[0];
+	// SpecVersion is a comma separated list like "2.0, 0, 1.16", the first component is the TPM spec version.
+	const spec_version = try row.get(allocator, "SpecVersion");
+	const version = if (std.mem.indexOfScalar(u8, spec_version, ',')) |comma| spec_version[0..comma] else spec_version;
+	try properties.append(allocator, .{ .name = "TPM Version", .value = version });
+	try properties.append(allocator, .{ .name = "TPM Enabled", .value = decodeBool(try row.get(allocator, "IsEnabled_InitialValue")) });
+	try properties.append(allocator, .{ .name = "TPM Activated", .value = decodeBool(try row.get(allocator, "IsActivated_InitialValue")) });
+}
+
+fn decodeBool(raw: []const u8) []const u8 {
+	if (raw.len == 0) return "";
+	return if (std.mem.eql(u8, raw, "True")) "Yes" else "No";
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
-	const rows = try conn.query(allocator, "SELECT Manufacturer, SMBIOSBIOSVersion, ReleaseDate, SerialNumber FROM Win32_BIOS", "ROOT\\CIMV2");
+	const rows = try conn.query(allocator, "SELECT Manufacturer, SMBIOSBIOSVersion, SMBIOSMajorVersion, SMBIOSMinorVersion, ReleaseDate, SerialNumber FROM Win32_BIOS", "ROOT\\CIMV2");
 	defer for (rows) |*row| row.deinit();
 	var items = std.ArrayList(CategoryItem).empty;
 	if (rows.len == 0) return items.toOwnedSlice(allocator);
 	const row = &rows[0];
 	const release_date = try row.get(allocator, "ReleaseDate");
-	const properties = try allocator.dupe(PropertyRow, &.{
-		.{ .name = "Manufacturer", .value = try row.get(allocator, "Manufacturer") },
-		.{ .name = "Version", .value = try row.get(allocator, "SMBIOSBIOSVersion") },
-		.{ .name = "Release Date", .value = try wmi.formatWmiDateTime(allocator, release_date) },
-		.{ .name = "Mode", .value = biosMode() },
-		.{ .name = "Secure Boot", .value = secureBootStatus() },
-		.{ .name = "Serial Number", .value = try row.get(allocator, "SerialNumber") },
-	});
-	try items.append(allocator, .{ .label = "BIOS", .properties = properties });
+	const smbios_major = try row.get(allocator, "SMBIOSMajorVersion");
+	const smbios_minor = try row.get(allocator, "SMBIOSMinorVersion");
+	var properties = std.ArrayList(PropertyRow).empty;
+	try properties.append(allocator, .{ .name = "Manufacturer", .value = try row.get(allocator, "Manufacturer") });
+	try properties.append(allocator, .{ .name = "Version", .value = try row.get(allocator, "SMBIOSBIOSVersion") });
+	try properties.append(allocator, .{ .name = "Release Date", .value = try wmi.formatWmiDateTime(allocator, release_date) });
+	try properties.append(allocator, .{ .name = "Mode", .value = biosMode() });
+	try properties.append(allocator, .{ .name = "Secure Boot", .value = secureBootStatus() });
+	if (smbios_major.len > 0 and smbios_minor.len > 0) try properties.append(allocator, .{ .name = "SMBIOS Version", .value = try std.mem.concat(allocator, u8, &.{ smbios_major, ".", smbios_minor }) });
+	try appendTpmInfo(allocator, conn, &properties);
+	try properties.append(allocator, .{ .name = "Serial Number", .value = try row.get(allocator, "SerialNumber") });
+	try items.append(allocator, .{ .label = "BIOS", .properties = try properties.toOwnedSlice(allocator) });
 	return items.toOwnedSlice(allocator);
 }
