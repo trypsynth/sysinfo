@@ -221,14 +221,31 @@ pub const WmiRow = struct {
 	}
 };
 
-/// Lazily initialized, process wide WMI connection. Callers never touch COM/WBEM directly, they call query() with a WQL string and a namespace.
+/// CoInitializeSecurity is process wide and, unlike CoInitializeEx, may only actually run once for the life of the process, so unlike everything else on WmiConnection it can't just be made per thread. Providers now run one per worker thread (see main_window.zig), each lazily creating its own WmiConnection the first time it queries, so this guards against two of them racing to call it for the first time concurrently. A spinlock is fine here (rather than a blocking OS mutex) since the guarded section is a couple of HRESULT calls and, once security_init_result is populated, every later caller (including ones from future refreshes) takes the cheap read-only path below without ever touching the lock's contended path again.
+var security_init_lock: std.atomic.Mutex = .unlocked;
+var security_init_result: ?anyerror!void = null;
+
+fn ensureSecurityInitialized() !void {
+	if (security_init_result) |result| return result;
+	while (!security_init_lock.tryLock()) {}
+	defer security_init_lock.unlock();
+	if (security_init_result) |result| return result;
+	const hr = CoInitializeSecurity(null, -1, null, null, 1, 3, null, 0, null);
+	const RPC_E_TOO_LATE: HRESULT = @bitCast(@as(u32, 0x80010119));
+	const result: anyerror!void = if (hr < 0 and hr != RPC_E_TOO_LATE) error.SecurityInitFailed else {};
+	security_init_result = result;
+	return result;
+}
+
+/// Lazily initialized WMI connection, one per OS thread (see instance_storage below). Callers never touch COM/WBEM directly, they call query() with a WQL string and a namespace.
 pub const WmiConnection = struct {
 	com_initialized: bool,
 	locator: *IWbemLocator,
 	services_by_namespace: std.StringHashMap(*IWbemServices),
 	allocator: std.mem.Allocator,
 
-	var instance_storage: ?WmiConnection = null;
+	/// COM apartments are inherently per thread (CoInitializeEx sets up thread local state, and an object created on one thread generally can't just be handed to another without marshaling), so this is threadlocal rather than a single process wide instance. Each provider worker thread transparently gets its own locator and its own namespace/services cache, with no locking needed since nothing here is ever shared across threads.
+	threadlocal var instance_storage: ?WmiConnection = null;
 
 	pub fn instance(allocator: std.mem.Allocator) !*WmiConnection {
 		if (instance_storage == null) instance_storage = try WmiConnection.init(allocator);
@@ -236,16 +253,14 @@ pub const WmiConnection = struct {
 	}
 
 	fn init(allocator: std.mem.Allocator) !WmiConnection {
-		var hr = CoInitializeEx(null, 2);
+		const hr = CoInitializeEx(null, 2);
 		const RPC_E_CHANGED_MODE: HRESULT = @bitCast(@as(u32, 0x80010106));
 		if (hr < 0 and hr != RPC_E_CHANGED_MODE) return error.ComInitFailed;
 		const com_initialized = hr != RPC_E_CHANGED_MODE;
-		hr = CoInitializeSecurity(null, -1, null, null, 1, 3, null, 0, null);
-		const RPC_E_TOO_LATE: HRESULT = @bitCast(@as(u32, 0x80010119));
-		if (hr < 0 and hr != RPC_E_TOO_LATE) return error.SecurityInitFailed;
+		try ensureSecurityInitialized();
 		var locator_opt: ?*anyopaque = null;
-		hr = CoCreateInstance(&CLSID_WbemLocator, null, 1, &IID_IWbemLocator, &locator_opt);
-		if (hr < 0 or locator_opt == null) return error.CreateLocatorFailed;
+		const create_hr = CoCreateInstance(&CLSID_WbemLocator, null, 1, &IID_IWbemLocator, &locator_opt);
+		if (create_hr < 0 or locator_opt == null) return error.CreateLocatorFailed;
 		return .{ .com_initialized = com_initialized, .locator = @ptrCast(@alignCast(locator_opt.?)), .services_by_namespace = std.StringHashMap(*IWbemServices).init(allocator), .allocator = allocator };
 	}
 

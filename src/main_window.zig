@@ -11,6 +11,8 @@ const properties_list_id: usize = 104;
 const menu_refresh_id: usize = 201;
 const menu_exit_id: usize = 202;
 const menu_copy_id: usize = 203;
+const refresh_timer_id: usize = 301;
+const refresh_tick_ms: win32.UINT = 100;
 
 fn idMenu(id: usize) win32.HMENU {
 	return @ptrFromInt(id);
@@ -48,6 +50,18 @@ fn buildDialogTemplate(allocator: std.mem.Allocator, title: [:0]const u16) ![]u8
 	return buffer.toOwnedSlice(allocator);
 }
 
+const provider_count = provider_registry.providers.len;
+
+const ProviderResult = struct {
+	items: []CategoryItem = &.{},
+};
+
+/// Runs on its own worker thread, one per provider (see startRefresh), so a provider stuck waiting on a slow or first-time-spun-up WMI namespace no longer blocks every other provider behind it, or the window from appearing at all. Errors are swallowed the same way the old sequential loop's `catch continue` did, just per provider now instead of process wide. `done` is set last, with a release store, so onTimerTick's acquire load on the UI thread is guaranteed to see `out.items` fully written by the time it observes `done == true`.
+fn runProviderThread(get_items: provider_registry.GetItemsFn, allocator: std.mem.Allocator, out: *ProviderResult, done: *bool) void {
+	out.items = get_items(allocator) catch &.{};
+	@atomicStore(bool, done, true, .release);
+}
+
 pub const MainWindow = struct {
 	instance: win32.HINSTANCE,
 	hwnd: win32.HWND = null,
@@ -58,9 +72,22 @@ pub const MainWindow = struct {
 	accelerators: win32.HACCEL = null,
 	items: []const CategoryItem = &.{},
 	arena: std.heap.ArenaAllocator,
+	// One dedicated arena per provider, each ever touched only by that provider's own worker thread, so no locking is needed. self.items (built in the combine arena above) borrows from these, so they're reset together with it at the start of every refresh, never independently.
+	provider_arenas: [provider_count]std.heap.ArenaAllocator = undefined,
+	results: [provider_count]ProviderResult = undefined,
+	provider_done: [provider_count]bool = undefined,
+	threads: [provider_count]?std.Thread = undefined,
+	// How many providers were done as of the last rebuild, so onTimerTick only touches the listbox (and loses the user's scroll position/selection highlight) when something has actually changed, not on every idle tick.
+	last_done_count: usize = 0,
+	refresh_timer_active: bool = false,
 
 	pub fn init(instance: win32.HINSTANCE, backing_allocator: std.mem.Allocator) MainWindow {
-		return .{ .instance = instance, .arena = std.heap.ArenaAllocator.init(backing_allocator) };
+		var self: MainWindow = .{ .instance = instance, .arena = std.heap.ArenaAllocator.init(backing_allocator) };
+		for (&self.provider_arenas) |*provider_arena| provider_arena.* = std.heap.ArenaAllocator.init(backing_allocator);
+		for (&self.results) |*result| result.* = .{};
+		for (&self.provider_done) |*done| done.* = false;
+		for (&self.threads) |*t| t.* = null;
+		return self;
 	}
 
 	pub fn create(self: *MainWindow) !win32.HWND {
@@ -105,11 +132,17 @@ pub const MainWindow = struct {
 				self.onCommand(wparam, lparam);
 				return 1;
 			},
+			win32.WM_TIMER => {
+				self.onTimerTick();
+				return 1;
+			},
 			win32.WM_CLOSE => {
 				_ = win32.DestroyWindow(hwnd);
 				return 1;
 			},
 			win32.WM_DESTROY => {
+				// Guards against a worker thread from an in-flight refresh writing into self.results/self.provider_arenas after this MainWindow (a stack local in main()) has gone out of scope. Providers are quick enough in practice that this is rarely more than an instant, worst case bounded by however long the single slowest provider takes.
+				self.waitForOutstandingThreads();
 				win32.PostQuitMessage(0);
 				return 1;
 			},
@@ -136,7 +169,7 @@ pub const MainWindow = struct {
 		_ = win32.SetMenu(hwnd, menu_bar);
 		const accels = [_]win32.ACCEL{ .{ .fVirt = win32.FVIRTKEY, .key = win32.VK_F5, .cmd = menu_refresh_id }, .{ .fVirt = win32.FVIRTKEY | win32.FCONTROL, .key = 'C', .cmd = menu_copy_id } };
 		self.accelerators = win32.CreateAcceleratorTableW(&accels, accels.len);
-		self.refreshCategories();
+		self.startRefresh();
 		_ = win32.SetFocus(self.categories_list);
 	}
 
@@ -164,7 +197,7 @@ pub const MainWindow = struct {
 			return;
 		}
 		if (id == menu_refresh_id) {
-			self.refreshCategories();
+			self.startRefresh();
 		} else if (id == menu_exit_id) {
 			_ = win32.DestroyWindow(self.hwnd);
 		} else if (id == menu_copy_id) {
@@ -174,29 +207,91 @@ pub const MainWindow = struct {
 		}
 	}
 
-	fn refreshCategories(self: *MainWindow) void {
+	/// Kicks off a fresh load. Every provider runs on its own worker thread (runProviderThread) instead of being awaited here, so the window shows up immediately and a single slow provider (e.g. a WMI namespace whose provider host has to spin up for the first time) can't hold up either the window or every other provider behind it. A repeating timer (onTimerTick) picks up results as they land.
+	fn startRefresh(self: *MainWindow) void {
+		if (self.refresh_timer_active) return; // a refresh is already in flight; let it finish rather than racing a second set of threads against the first over shared state
 		_ = win32.SendMessageW(self.categories_list, win32.LB_RESETCONTENT, 0, 0);
 		_ = win32.SendMessageW(self.properties_list, win32.LB_RESETCONTENT, 0, 0);
 		_ = self.arena.reset(.retain_capacity);
+		self.items = &.{};
+		self.last_done_count = 0;
+		for (&self.results) |*result| result.* = .{};
+		for (&self.provider_done) |*done| done.* = false;
+		for (provider_registry.providers, 0..) |get_items, i| {
+			_ = self.provider_arenas[i].reset(.retain_capacity);
+			const provider_allocator = self.provider_arenas[i].allocator();
+			// If the thread pool is exhausted (very unlikely for 11 short-lived threads), fall back to running that one provider inline rather than dropping it.
+			self.threads[i] = std.Thread.spawn(.{}, runProviderThread, .{ get_items, provider_allocator, &self.results[i], &self.provider_done[i] }) catch blk: {
+				runProviderThread(get_items, provider_allocator, &self.results[i], &self.provider_done[i]);
+				break :blk null;
+			};
+		}
+		self.refresh_timer_active = true;
+		_ = win32.SetTimer(self.hwnd, refresh_timer_id, refresh_tick_ms, null);
+		self.onTimerTick(); // pick up anything that already finished (e.g. the inline fallback above) instead of waiting for the first tick
+	}
+
+	fn onTimerTick(self: *MainWindow) void {
+		var done_count: usize = 0;
+		for (&self.provider_done) |*done| {
+			if (@atomicLoad(bool, done, .acquire)) done_count += 1;
+		}
+		if (done_count != self.last_done_count) {
+			self.last_done_count = done_count;
+			self.rebuildCategoriesFromCompleted();
+		}
+		if (done_count == provider_count) {
+			_ = win32.KillTimer(self.hwnd, refresh_timer_id);
+			self.refresh_timer_active = false;
+			self.waitForOutstandingThreads(); // every provider is done, so this just reclaims the OS thread handles
+		}
+	}
+
+	/// Rebuilds the categories list from whichever providers have completed so far. Only called when the completed count has actually changed (see onTimerTick), so the list doesn't flicker or reset scroll position on every idle tick while a slow provider is still pending.
+	fn rebuildCategoriesFromCompleted(self: *MainWindow) void {
 		const allocator = self.arena.allocator();
 		var collected = std.ArrayList(CategoryItem).empty;
-		for (provider_registry.providers) |get_items| {
-			const provider_items = get_items(allocator) catch continue;
-			collected.appendSlice(allocator, provider_items) catch continue;
+		for (0..provider_count) |i| {
+			if (!@atomicLoad(bool, &self.provider_done[i], .acquire)) continue;
+			collected.appendSlice(allocator, self.results[i].items) catch continue;
 		}
 		std.mem.sort(CategoryItem, collected.items, {}, struct {
 			fn lessThan(_: void, a: CategoryItem, b: CategoryItem) bool {
 				return std.mem.lessThan(u8, a.label, b.label);
 			}
 		}.lessThan);
+		// Preserve whatever the user has selected across the rebuild (matched by label, since indices shift as more categories land), rather than yanking their selection back to the top every time another provider finishes.
+		const selected_label: ?[]const u8 = blk: {
+			const current: i32 = @intCast(@as(isize, @bitCast(win32.SendMessageW(self.categories_list, win32.LB_GETCURSEL, 0, 0))));
+			if (current < 0 or current >= self.items.len) break :blk null;
+			break :blk self.items[@intCast(current)].label;
+		};
+		_ = win32.SendMessageW(self.categories_list, win32.LB_RESETCONTENT, 0, 0);
 		self.items = collected.items;
 		for (self.items) |item| {
 			const wide = toWide(allocator, item.label) catch continue;
 			_ = win32.SendMessageW(self.categories_list, win32.LB_ADDSTRING, 0, ptrToLparam(wide.ptr));
 		}
-		if (self.items.len > 0) {
-			_ = win32.SendMessageW(self.categories_list, win32.LB_SETCURSEL, 0, 0);
-			self.populateProperties(0);
+		if (self.items.len == 0) return;
+		var selected_index: usize = 0;
+		if (selected_label) |label| {
+			for (self.items, 0..) |item, i| {
+				if (std.mem.eql(u8, item.label, label)) {
+					selected_index = i;
+					break;
+				}
+			}
+		}
+		_ = win32.SendMessageW(self.categories_list, win32.LB_SETCURSEL, selected_index, 0);
+		self.populateProperties(@intCast(selected_index));
+	}
+
+	fn waitForOutstandingThreads(self: *MainWindow) void {
+		for (&self.threads) |*maybe_thread| {
+			if (maybe_thread.*) |t| {
+				t.join();
+				maybe_thread.* = null;
+			}
 		}
 	}
 

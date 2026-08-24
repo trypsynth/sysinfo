@@ -127,6 +127,7 @@ pub const WM_SIZE: UINT = 0x0005;
 pub const WM_COMMAND: UINT = 0x0111;
 pub const WM_CLOSE: UINT = 0x0010;
 pub const WM_DESTROY: UINT = 0x0002;
+pub const WM_TIMER: UINT = 0x0113;
 pub const WM_SETFONT: UINT = 0x0030;
 pub const LB_RESETCONTENT: UINT = 0x0184;
 pub const LB_ADDSTRING: UINT = 0x0180;
@@ -180,6 +181,8 @@ pub extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(.c) isize;
 pub extern "user32" fn GetMessageW(lpMsg: *MSG, hWnd: HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT) callconv(.c) BOOL;
 pub extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.c) BOOL;
 pub extern "user32" fn UpdateWindow(hWnd: HWND) callconv(.c) BOOL;
+pub extern "user32" fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: UINT, lpTimerFunc: ?*anyopaque) callconv(.c) usize;
+pub extern "user32" fn KillTimer(hWnd: HWND, uIDEvent: usize) callconv(.c) BOOL;
 
 pub fn loword(l: LPARAM) u16 {
 	return @truncate(@as(usize, @bitCast(l)) & 0xffff);
