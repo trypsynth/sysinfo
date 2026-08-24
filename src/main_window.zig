@@ -3,6 +3,7 @@ const win32 = @import("win32.zig");
 const provider_registry = @import("core/provider_registry.zig");
 const category_item = @import("core/category_item.zig");
 const CategoryItem = category_item.CategoryItem;
+const PropertyRow = category_item.PropertyRow;
 
 const categories_label_id: usize = 101;
 const categories_list_id: usize = 102;
@@ -56,6 +57,9 @@ const ProviderResult = struct {
 	items: []CategoryItem = &.{},
 };
 
+// Shared by every not-yet-finished provider's placeholder category, a single static allocation reused as-is across every rebuild rather than re-created each time. Reusing the exact same slice (compared by .ptr in rebuildCategoriesFromCompleted) is what lets a placeholder that's still loading be told apart from one that just started real work, without one being mistaken for "changed" just because some *other* provider finished in the meantime.
+const loading_properties = [_]PropertyRow{.{ .name = "Status", .value = "Loading..." }};
+
 /// Runs on its own worker thread, one per provider (see startRefresh), so a provider stuck waiting on a slow or first-time-spun-up WMI namespace no longer blocks every other provider behind it, or the window from appearing at all. Errors are swallowed the same way the old sequential loop's `catch continue` did, just per provider now instead of process wide. `done` is set last, with a release store, so onTimerTick's acquire load on the UI thread is guaranteed to see `out.items` fully written by the time it observes `done == true`.
 fn runProviderThread(get_items: provider_registry.GetItemsFn, allocator: std.mem.Allocator, out: *ProviderResult, done: *bool) void {
 	out.items = get_items(allocator) catch &.{};
@@ -77,9 +81,11 @@ pub const MainWindow = struct {
 	results: [provider_count]ProviderResult = undefined,
 	provider_done: [provider_count]bool = undefined,
 	threads: [provider_count]?std.Thread = undefined,
-	// How many providers were done as of the last rebuild, so onTimerTick only touches the listbox (and loses the user's scroll position/selection highlight) when something has actually changed, not on every idle tick.
-	last_done_count: usize = 0,
+	// How many providers were done as of the last rebuild, so onTimerTick only touches the listbox when something has actually changed, not on every idle tick. Starts higher than provider_count could ever be so the very first tick (0 done) still counts as "changed" and paints the initial all-placeholders list.
+	last_done_count: usize = provider_count + 1,
 	refresh_timer_active: bool = false,
+	// The properties slice currently painted into properties_list, compared by .ptr against the selected category's properties each rebuild so the pane is only ever repainted (losing scroll position) when what it's showing actually changed, not just because some other category finished loading.
+	rendered_properties: []const PropertyRow = &.{},
 
 	pub fn init(instance: win32.HINSTANCE, backing_allocator: std.mem.Allocator) MainWindow {
 		var self: MainWindow = .{ .instance = instance, .arena = std.heap.ArenaAllocator.init(backing_allocator) };
@@ -193,6 +199,8 @@ pub const MainWindow = struct {
 			if (id == categories_list_id and (wparam >> 16) == win32.LBN_SELCHANGE) {
 				const index: i32 = @intCast(@as(isize, @bitCast(win32.SendMessageW(self.categories_list, win32.LB_GETCURSEL, 0, 0))));
 				self.populateProperties(index);
+				// Keep rendered_properties in sync with a manual click too, so a background rebuild right afterward correctly recognizes this category as already showing its current content instead of needlessly repainting it.
+				self.rendered_properties = if (index >= 0 and index < self.items.len) self.items[@intCast(index)].properties else &.{};
 			}
 			return;
 		}
@@ -214,7 +222,8 @@ pub const MainWindow = struct {
 		_ = win32.SendMessageW(self.properties_list, win32.LB_RESETCONTENT, 0, 0);
 		_ = self.arena.reset(.retain_capacity);
 		self.items = &.{};
-		self.last_done_count = 0;
+		self.last_done_count = provider_count + 1; // never equal to a real done_count, so the first tick's all-placeholders state still counts as "changed" and gets painted
+		self.rendered_properties = &.{};
 		for (&self.results) |*result| result.* = .{};
 		for (&self.provider_done) |*done| done.* = false;
 		for (provider_registry.providers, 0..) |get_items, i| {
@@ -247,25 +256,25 @@ pub const MainWindow = struct {
 		}
 	}
 
-	/// Rebuilds the categories list from whichever providers have completed so far. Only called when the completed count has actually changed (see onTimerTick), so the list doesn't flicker or reset scroll position on every idle tick while a slow provider is still pending.
+	/// Rebuilds the categories list from whichever providers have completed so far, standing in a placeholder category (loading_properties) for every provider that hasn't finished yet so the full set of categories is visible from the very first paint rather than trickling in one at a time. Only called when the completed count has actually changed (see onTimerTick), so the list doesn't flicker while a slow provider is still pending and nothing else has changed.
 	fn rebuildCategoriesFromCompleted(self: *MainWindow) void {
 		const allocator = self.arena.allocator();
 		var collected = std.ArrayList(CategoryItem).empty;
 		for (0..provider_count) |i| {
-			if (!@atomicLoad(bool, &self.provider_done[i], .acquire)) continue;
-			collected.appendSlice(allocator, self.results[i].items) catch continue;
+			if (@atomicLoad(bool, &self.provider_done[i], .acquire)) {
+				collected.appendSlice(allocator, self.results[i].items) catch continue;
+			} else {
+				collected.append(allocator, .{ .label = provider_registry.placeholder_labels[i], .properties = &loading_properties }) catch continue;
+			}
 		}
 		std.mem.sort(CategoryItem, collected.items, {}, struct {
 			fn lessThan(_: void, a: CategoryItem, b: CategoryItem) bool {
 				return std.mem.lessThan(u8, a.label, b.label);
 			}
 		}.lessThan);
-		// Preserve whatever the user has selected across the rebuild (matched by label, since indices shift as more categories land), rather than yanking their selection back to the top every time another provider finishes.
-		const selected_label: ?[]const u8 = blk: {
-			const current: i32 = @intCast(@as(isize, @bitCast(win32.SendMessageW(self.categories_list, win32.LB_GETCURSEL, 0, 0))));
-			if (current < 0 or current >= self.items.len) break :blk null;
-			break :blk self.items[@intCast(current)].label;
-		};
+		// Preserve whatever the user has selected across the rebuild (matched by label, since indices shift as more categories land), rather than yanking their selection back to a fixed spot every time another provider finishes.
+		const old_index: i32 = @intCast(@as(isize, @bitCast(win32.SendMessageW(self.categories_list, win32.LB_GETCURSEL, 0, 0))));
+		const selected_label: ?[]const u8 = if (old_index < 0 or old_index >= self.items.len) null else self.items[@intCast(old_index)].label;
 		_ = win32.SendMessageW(self.categories_list, win32.LB_RESETCONTENT, 0, 0);
 		self.items = collected.items;
 		for (self.items) |item| {
@@ -274,16 +283,25 @@ pub const MainWindow = struct {
 		}
 		if (self.items.len == 0) return;
 		var selected_index: usize = 0;
+		var matched_by_label = false;
 		if (selected_label) |label| {
 			for (self.items, 0..) |item, i| {
 				if (std.mem.eql(u8, item.label, label)) {
 					selected_index = i;
+					matched_by_label = true;
 					break;
 				}
 			}
 		}
+		// A label can genuinely disappear between rebuilds (e.g. the "Memory" placeholder splitting into "Memory, Summary" plus one entry per stick once that provider finishes). Falling back to the same position, rather than jumping back to the first category, keeps the user roughly where they were.
+		if (!matched_by_label and old_index >= 0) selected_index = @min(@as(usize, @intCast(old_index)), self.items.len - 1);
 		_ = win32.SendMessageW(self.categories_list, win32.LB_SETCURSEL, selected_index, 0);
-		self.populateProperties(@intCast(selected_index));
+		// Only actually repaint the properties pane (which resets scroll position) when what it would show has changed: the selection moved to a genuinely different category, or the same category's content changed (e.g. its placeholder just got replaced with real data). A provider finishing in the background while the user looks at an already-loaded, unrelated category should never touch this.
+		const new_properties = self.items[selected_index].properties;
+		if (!matched_by_label or new_properties.ptr != self.rendered_properties.ptr) {
+			self.populateProperties(@intCast(selected_index));
+			self.rendered_properties = new_properties;
+		}
 	}
 
 	fn waitForOutstandingThreads(self: *MainWindow) void {

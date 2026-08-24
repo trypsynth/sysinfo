@@ -27,3 +27,18 @@ pub const providers = [_]GetItemsFn{
 	os_provider.getItems,
 	storage.getItems,
 };
+
+/// The label each provider above uses for its single-instance case (or, for the always-multi providers, a reasonable stand-in), one per entry in `providers` in the same order. Used to show a placeholder category before that provider has actually finished querying WMI, see MainWindow.rebuildCategoriesFromCompleted.
+pub const placeholder_labels = [_][]const u8{
+	"Battery",
+	"BIOS",
+	"Computer System",
+	"Processor",
+	"Display",
+	"GPU",
+	"Memory",
+	"Motherboard",
+	"Network",
+	"Operating System",
+	"Storage",
+};
