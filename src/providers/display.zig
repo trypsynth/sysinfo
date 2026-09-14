@@ -78,6 +78,30 @@ fn decodeVideoInputType(raw: []const u8) []const u8 {
 	return "";
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". Just enough of the WmiMonitorID query to get real per-monitor names, skipping the size/live-resolution lookups getItems() needs.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
+	const rows = try conn.query(allocator, "SELECT UserFriendlyName FROM WmiMonitorID", "ROOT\\WMI");
+	defer for (rows) |*row| row.deinit();
+	var items = std.ArrayList(CategoryItem).empty;
+	for (rows) |*row| {
+		const friendly_name = try decodeEdidString(allocator, try row.getList(allocator, "UserFriendlyName"));
+		const label = if (friendly_name.len == 0) "Display" else try std.mem.concat(allocator, u8, &.{ "Display, ", friendly_name });
+		const properties = try allocator.dupe(PropertyRow, &.{
+			.{ .name = "Manufacturer", .value = "Loading..." },
+			.{ .name = "Resolution", .value = "Loading..." },
+			.{ .name = "Refresh Rate", .value = "Loading..." },
+			.{ .name = "Primary Display", .value = "Loading..." },
+			.{ .name = "Serial Number", .value = "Loading..." },
+			.{ .name = "Manufacture Date", .value = "Loading..." },
+			.{ .name = "Screen Size", .value = "Loading..." },
+			.{ .name = "Input Type", .value = "Loading..." },
+		});
+		try items.append(allocator, .{ .label = label, .properties = properties });
+	}
+	return items.toOwnedSlice(allocator);
+}
+
 /// Win32_DesktopMonitor (ROOT\CIMV2) is almost always sparse on modern hardware (blank manufacturer, blank resolution). WmiMonitorID/WmiMonitorBasicDisplayParams (ROOT\WMI, exposed by the monitor class driver from the panel's own EDID) give real identity and physical size instead, EnumDisplayDevices/EnumDisplaySettings (native Win32, no WMI involved) give the actual live resolution and refresh rate.
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);

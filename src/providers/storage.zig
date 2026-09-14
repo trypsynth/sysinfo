@@ -120,6 +120,34 @@ fn appendVolumeProperties(allocator: std.mem.Allocator, properties: *std.ArrayLi
 	try properties.append(allocator, .{ .name = try std.mem.concat(allocator, u8, &.{ prefix, "File System" }), .value = try volume.get(allocator, "FileSystem") });
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". Only covers physical disks (Win32_DiskDrive.Caption is enough to know real names), not the rarer logical-only volume case getItems() also handles, since that needs the same partition/volume associator walk getItems() does, which defeats the point of a cheap placeholder query; that case just appears once getItems() itself finishes.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
+	const rows = try conn.query(allocator, "SELECT Caption FROM Win32_DiskDrive", "ROOT\\CIMV2");
+	defer for (rows) |*row| row.deinit();
+	var items = std.ArrayList(CategoryItem).empty;
+	for (rows) |*row| {
+		const label = try std.mem.concat(allocator, u8, &.{ "Storage, ", try row.get(allocator, "Caption") });
+		const properties = try allocator.dupe(PropertyRow, &.{
+			.{ .name = "Model", .value = "Loading..." },
+			.{ .name = "Interface", .value = "Loading..." },
+			.{ .name = "Bus Type", .value = "Loading..." },
+			.{ .name = "Media Type", .value = "Loading..." },
+			.{ .name = "Drive Type", .value = "Loading..." },
+			.{ .name = "Total Size", .value = "Loading..." },
+			.{ .name = "Used Space", .value = "Loading..." },
+			.{ .name = "Free Space", .value = "Loading..." },
+			.{ .name = "File System", .value = "Loading..." },
+			.{ .name = "Partitions", .value = "Loading..." },
+			.{ .name = "Health Status", .value = "Loading..." },
+			.{ .name = "Firmware Revision", .value = "Loading..." },
+			.{ .name = "Serial Number", .value = "Loading..." },
+		});
+		try items.append(allocator, .{ .label = label, .properties = properties });
+	}
+	return items.toOwnedSlice(allocator);
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	var items = std.ArrayList(CategoryItem).empty;

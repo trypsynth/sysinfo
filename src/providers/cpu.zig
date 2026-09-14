@@ -49,6 +49,31 @@ fn l1CacheSize(allocator: std.mem.Allocator, conn: *wmi.WmiConnection) ![]const 
 	return format.withUnit(allocator, try std.fmt.allocPrint(allocator, "{d}", .{total}), " KB");
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". Multi-socket systems are rare enough that this always assumes a single "Processor" category, same as the placeholder label the old design used.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const properties = try allocator.dupe(PropertyRow, &.{
+		.{ .name = "Name", .value = "Loading..." },
+		.{ .name = "Manufacturer", .value = "Loading..." },
+		.{ .name = "Architecture", .value = "Loading..." },
+		.{ .name = "Socket", .value = "Loading..." },
+		.{ .name = "Cores", .value = "Loading..." },
+		.{ .name = "Logical Processors", .value = "Loading..." },
+		.{ .name = "Hyper-Threading", .value = "Loading..." },
+		.{ .name = "Max Clock Speed", .value = "Loading..." },
+		.{ .name = "Current Clock Speed", .value = "Loading..." },
+		.{ .name = "Bus Speed", .value = "Loading..." },
+		.{ .name = "Voltage", .value = "Loading..." },
+		.{ .name = "Current Load", .value = "Loading..." },
+		.{ .name = "L1 Cache", .value = "Loading..." },
+		.{ .name = "L2 Cache", .value = "Loading..." },
+		.{ .name = "L3 Cache", .value = "Loading..." },
+		.{ .name = "Address Width", .value = "Loading..." },
+		.{ .name = "Virtualization Enabled", .value = "Loading..." },
+		.{ .name = "Processor ID", .value = "Loading..." },
+	});
+	return allocator.dupe(CategoryItem, &.{.{ .label = "Processor", .properties = properties }});
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const rows = try conn.query(allocator, "SELECT Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, CurrentClockSpeed, ExtClock, CurrentVoltage, LoadPercentage, Architecture, L2CacheSize, L3CacheSize, SocketDesignation, AddressWidth, VirtualizationFirmwareEnabled, ProcessorId FROM Win32_Processor", "ROOT\\CIMV2");

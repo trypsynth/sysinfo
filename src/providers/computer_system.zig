@@ -32,6 +32,23 @@ fn appendIdentityInfo(allocator: std.mem.Allocator, conn: *wmi.WmiConnection, pr
 	if (uuid.len > 0 and !std.ascii.eqlIgnoreCase(uuid, "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")) try properties.append(allocator, .{ .name = "UUID", .value = uuid });
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". Computer System is always exactly one category, so this needs no query at all.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const properties = try allocator.dupe(PropertyRow, &.{
+		.{ .name = "Manufacturer", .value = "Loading..." },
+		.{ .name = "Model", .value = "Loading..." },
+		.{ .name = "Type", .value = "Loading..." },
+		.{ .name = "Architecture", .value = "Loading..." },
+		.{ .name = "Processors", .value = "Loading..." },
+		.{ .name = "Logical Processors", .value = "Loading..." },
+		.{ .name = "Hypervisor Present", .value = "Loading..." },
+		.{ .name = "Serial Number", .value = "Loading..." },
+		.{ .name = "UUID", .value = "Loading..." },
+		.{ .name = "Domain", .value = "Loading..." },
+	});
+	return allocator.dupe(CategoryItem, &.{.{ .label = "Computer System", .properties = properties }});
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const rows = try conn.query(allocator, "SELECT Manufacturer, Model, SystemType, PCSystemType, Domain, PartOfDomain, HypervisorPresent, NumberOfProcessors, NumberOfLogicalProcessors FROM Win32_ComputerSystem", "ROOT\\CIMV2");

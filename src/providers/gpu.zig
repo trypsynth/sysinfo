@@ -5,6 +5,32 @@ const category_item = @import("../core/category_item.zig");
 const CategoryItem = category_item.CategoryItem;
 const PropertyRow = category_item.PropertyRow;
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". Just the adapter names, skipping every other Win32_VideoController column getItems() needs.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
+	const rows = try conn.query(allocator, "SELECT Name FROM Win32_VideoController", "ROOT\\CIMV2");
+	defer for (rows) |*row| row.deinit();
+	var items = std.ArrayList(CategoryItem).empty;
+	for (rows) |*row| {
+		const name = try row.get(allocator, "Name");
+		const label = if (rows.len > 1) try std.mem.concat(allocator, u8, &.{ "GPU, ", name }) else "GPU";
+		const properties = try allocator.dupe(PropertyRow, &.{
+			.{ .name = "Name", .value = "Loading..." },
+			.{ .name = "Vendor", .value = "Loading..." },
+			.{ .name = "Video Processor", .value = "Loading..." },
+			.{ .name = "Driver Version", .value = "Loading..." },
+			.{ .name = "Driver Date", .value = "Loading..." },
+			.{ .name = "Status", .value = "Loading..." },
+			.{ .name = "Refresh Rate", .value = "Loading..." },
+			.{ .name = "Color Depth", .value = "Loading..." },
+			.{ .name = "Video Memory", .value = "Loading..." },
+			.{ .name = "Current Resolution", .value = "Loading..." },
+		});
+		try items.append(allocator, .{ .label = label, .properties = properties });
+	}
+	return items.toOwnedSlice(allocator);
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const rows = try conn.query(allocator, "SELECT Name, AdapterCompatibility, VideoProcessor, DriverVersion, DriverDate, CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate, CurrentBitsPerPixel, AdapterRAM, Status FROM Win32_VideoController", "ROOT\\CIMV2");

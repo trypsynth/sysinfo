@@ -41,6 +41,20 @@ fn decodeBool(raw: []const u8) []const u8 {
 	return if (std.mem.eql(u8, raw, "True")) "Yes" else "No";
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". BIOS is always exactly one category, so this needs no query at all.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const properties = try allocator.dupe(PropertyRow, &.{
+		.{ .name = "Manufacturer", .value = "Loading..." },
+		.{ .name = "Version", .value = "Loading..." },
+		.{ .name = "Release Date", .value = "Loading..." },
+		.{ .name = "Mode", .value = "Loading..." },
+		.{ .name = "Secure Boot", .value = "Loading..." },
+		.{ .name = "SMBIOS Version", .value = "Loading..." },
+		.{ .name = "Serial Number", .value = "Loading..." },
+	});
+	return allocator.dupe(CategoryItem, &.{.{ .label = "BIOS", .properties = properties }});
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const rows = try conn.query(allocator, "SELECT Manufacturer, SMBIOSBIOSVersion, SMBIOSMajorVersion, SMBIOSMinorVersion, ReleaseDate, SerialNumber FROM Win32_BIOS", "ROOT\\CIMV2");

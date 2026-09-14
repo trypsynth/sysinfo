@@ -14,31 +14,22 @@ const storage = @import("../providers/storage.zig");
 
 pub const GetItemsFn = *const fn (allocator: std.mem.Allocator) anyerror![]CategoryItem;
 
-pub const providers = [_]GetItemsFn{
-	battery.getItems,
-	bios.getItems,
-	computer_system.getItems,
-	cpu.getItems,
-	display.getItems,
-	gpu.getItems,
-	memory.getItems,
-	motherboard.getItems,
-	network.getItems,
-	os_provider.getItems,
-	storage.getItems,
+pub const ProviderInfo = struct {
+	get_items: GetItemsFn,
+	// Same shape as get_items, but returns its category label(s) immediately with every property value set to "Loading...". Static single-instance providers (BIOS, Processor, etc.) build this with no query at all; providers whose instance count actually varies (Network, Storage, etc.) run one cheap identity-only query to learn real labels before the full, slower query runs.
+	get_shapes: GetItemsFn,
 };
 
-/// The label each provider above uses for its single-instance case (or, for the always-multi providers, a reasonable stand-in), one per entry in `providers` in the same order. Used to show a placeholder category before that provider has actually finished querying WMI, see MainWindow.rebuildCategoriesFromCompleted.
-pub const placeholder_labels = [_][]const u8{
-	"Battery",
-	"BIOS",
-	"Computer System",
-	"Processor",
-	"Display",
-	"GPU",
-	"Memory",
-	"Motherboard",
-	"Network",
-	"Operating System",
-	"Storage",
+pub const providers = [_]ProviderInfo{
+	.{ .get_items = battery.getItems, .get_shapes = battery.getShapes },
+	.{ .get_items = bios.getItems, .get_shapes = bios.getShapes },
+	.{ .get_items = computer_system.getItems, .get_shapes = computer_system.getShapes },
+	.{ .get_items = cpu.getItems, .get_shapes = cpu.getShapes },
+	.{ .get_items = display.getItems, .get_shapes = display.getShapes },
+	.{ .get_items = gpu.getItems, .get_shapes = gpu.getShapes },
+	.{ .get_items = memory.getItems, .get_shapes = memory.getShapes },
+	.{ .get_items = motherboard.getItems, .get_shapes = motherboard.getShapes },
+	.{ .get_items = network.getItems, .get_shapes = network.getShapes },
+	.{ .get_items = os_provider.getItems, .get_shapes = os_provider.getShapes },
+	.{ .get_items = storage.getItems, .get_shapes = storage.getShapes },
 };

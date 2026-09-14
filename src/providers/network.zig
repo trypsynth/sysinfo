@@ -63,6 +63,31 @@ fn appendAddresses(allocator: std.mem.Allocator, properties: *std.ArrayList(Prop
 	}
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading..." (the variable-count IPv4/IPv6 address rows excepted, collapsed to one representative "IPv4 Address" placeholder line). Just the adapter descriptions, skipping every other column getItems() needs.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
+	const rows = try conn.query(allocator, "SELECT Description FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = TRUE", "ROOT\\CIMV2");
+	defer for (rows) |*row| row.deinit();
+	var items = std.ArrayList(CategoryItem).empty;
+	for (rows) |*row| {
+		const label = try std.mem.concat(allocator, u8, &.{ "Network, ", try row.get(allocator, "Description") });
+		const properties = try allocator.dupe(PropertyRow, &.{
+			.{ .name = "MAC Address", .value = "Loading..." },
+			.{ .name = "Adapter Type", .value = "Loading..." },
+			.{ .name = "Connection Status", .value = "Loading..." },
+			.{ .name = "Link Speed", .value = "Loading..." },
+			.{ .name = "IPv4 Address", .value = "Loading..." },
+			.{ .name = "Subnet Mask", .value = "Loading..." },
+			.{ .name = "Default Gateway", .value = "Loading..." },
+			.{ .name = "DNS Servers", .value = "Loading..." },
+			.{ .name = "DNS Suffix", .value = "Loading..." },
+			.{ .name = "DHCP Enabled", .value = "Loading..." },
+		});
+		try items.append(allocator, .{ .label = label, .properties = properties });
+	}
+	return items.toOwnedSlice(allocator);
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	var temp_addresses = try temporaryIpv6Addresses(allocator, conn);

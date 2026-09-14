@@ -25,6 +25,32 @@ fn pageFileInfo(allocator: std.mem.Allocator, conn: *wmi.WmiConnection) !struct 
 	return .{ .size = try format.formatBytes(allocator, try std.fmt.allocPrint(allocator, "{d}", .{total_mb * 1024 * 1024})), .name = try rows[0].get(allocator, "Name") };
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". Operating System is always exactly one category, so this needs no query at all.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const properties = try allocator.dupe(PropertyRow, &.{
+		.{ .name = "Name", .value = "Loading..." },
+		.{ .name = "Computer Name", .value = "Loading..." },
+		.{ .name = "Version", .value = "Loading..." },
+		.{ .name = "Build Number", .value = "Loading..." },
+		.{ .name = "Architecture", .value = "Loading..." },
+		.{ .name = "Install Date", .value = "Loading..." },
+		.{ .name = "Last Boot", .value = "Loading..." },
+		.{ .name = "Uptime", .value = "Loading..." },
+		.{ .name = "Time Zone", .value = "Loading..." },
+		.{ .name = "Registered User", .value = "Loading..." },
+		.{ .name = "Serial Number", .value = "Loading..." },
+		.{ .name = "Windows Directory", .value = "Loading..." },
+		.{ .name = "System Directory", .value = "Loading..." },
+		.{ .name = "System Drive", .value = "Loading..." },
+		.{ .name = "Boot Device", .value = "Loading..." },
+		.{ .name = "Page File", .value = "Loading..." },
+		.{ .name = "Page File Size", .value = "Loading..." },
+		.{ .name = "Running Processes", .value = "Loading..." },
+		.{ .name = "Logged-on Users", .value = "Loading..." },
+	});
+	return allocator.dupe(CategoryItem, &.{.{ .label = "Operating System", .properties = properties }});
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const rows = try conn.query(allocator, "SELECT Caption, Version, BuildNumber, OSArchitecture, InstallDate, LastBootUpTime, SerialNumber, RegisteredUser, CSName, WindowsDirectory, SystemDirectory, SystemDrive, BootDevice, NumberOfProcesses, NumberOfUsers FROM Win32_OperatingSystem", "ROOT\\CIMV2");

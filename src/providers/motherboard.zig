@@ -40,6 +40,19 @@ fn appendChassisInfo(allocator: std.mem.Allocator, conn: *wmi.WmiConnection, pro
 	try properties.append(allocator, .{ .name = "Asset Tag", .value = std.mem.trim(u8, try rows[0].get(allocator, "SMBIOSAssetTag"), " ") });
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". Motherboard is always exactly one category, so this needs no query at all.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const properties = try allocator.dupe(PropertyRow, &.{
+		.{ .name = "Manufacturer", .value = "Loading..." },
+		.{ .name = "Product", .value = "Loading..." },
+		.{ .name = "Version", .value = "Loading..." },
+		.{ .name = "Chassis Type", .value = "Loading..." },
+		.{ .name = "Asset Tag", .value = "Loading..." },
+		.{ .name = "Serial Number", .value = "Loading..." },
+	});
+	return allocator.dupe(CategoryItem, &.{.{ .label = "Motherboard", .properties = properties }});
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const rows = try conn.query(allocator, "SELECT Manufacturer, Product, Version, SerialNumber FROM Win32_BaseBoard", "ROOT\\CIMV2");

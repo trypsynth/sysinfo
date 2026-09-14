@@ -102,6 +102,35 @@ fn batteryCycleCount(allocator: std.mem.Allocator, conn: *wmi.WmiConnection) ![]
 	return rows[0].get(allocator, "CycleCount");
 }
 
+/// Mirrors getItems()'s label and property names exactly, with every value replaced by "Loading...". A second battery is rare but not impossible, so this still queries Win32_Battery for names, just without any of the slower ROOT\WMI capacity/health lookups getItems() needs.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
+	const rows = try conn.query(allocator, "SELECT Name FROM Win32_Battery", "ROOT\\CIMV2");
+	defer for (rows) |*row| row.deinit();
+	var items = std.ArrayList(CategoryItem).empty;
+	const single = rows.len == 1;
+	for (rows) |*row| {
+		const label = if (single) "Battery" else try std.mem.concat(allocator, u8, &.{ "Battery, ", try row.get(allocator, "Name") });
+		const properties = try allocator.dupe(PropertyRow, &.{
+			.{ .name = "Charge Remaining", .value = "Loading..." },
+			.{ .name = "Status", .value = "Loading..." },
+			.{ .name = "Battery Health", .value = "Loading..." },
+			.{ .name = "Chemistry", .value = "Loading..." },
+			.{ .name = "Design Voltage", .value = "Loading..." },
+			.{ .name = "Design Capacity", .value = "Loading..." },
+			.{ .name = "Full Charge Capacity", .value = "Loading..." },
+			.{ .name = "Cycle Count", .value = "Loading..." },
+			.{ .name = "Estimated Time Remaining", .value = "Loading..." },
+			.{ .name = "Time to Full Charge", .value = "Loading..." },
+			.{ .name = "Manufacturer", .value = "Loading..." },
+			.{ .name = "Manufacture Date", .value = "Loading..." },
+			.{ .name = "Serial Number", .value = "Loading..." },
+		});
+		try items.append(allocator, .{ .label = label, .properties = properties });
+	}
+	return items.toOwnedSlice(allocator);
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	const rows = try conn.query(allocator, "SELECT Name, EstimatedChargeRemaining, Chemistry, DesignVoltage, EstimatedRunTime, TimeToFullCharge FROM Win32_Battery", "ROOT\\CIMV2");

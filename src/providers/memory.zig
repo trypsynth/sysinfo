@@ -52,6 +52,38 @@ fn formatMvAsV(allocator: std.mem.Allocator, mv_str: []const u8) ![]const u8 {
 	return std.fmt.allocPrint(allocator, "{d:.2} V", .{mv / 1000.0});
 }
 
+/// Mirrors getItems()'s labels and property names exactly, with every value replaced by "Loading..." (module "Configured Speed" excepted, since getItems() only ever shows it conditionally). "Memory, Summary" always exists, so it's added directly; module labels still need the DeviceLocator query to know real slot names/count.
+pub fn getShapes(allocator: std.mem.Allocator) ![]CategoryItem {
+	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
+	var items = std.ArrayList(CategoryItem).empty;
+	const summary_properties = try allocator.dupe(PropertyRow, &.{
+		.{ .name = "Physically Installed", .value = "Loading..." },
+		.{ .name = "Available to Windows", .value = "Loading..." },
+		.{ .name = "Hardware Reserved", .value = "Loading..." },
+		.{ .name = "Free", .value = "Loading..." },
+	});
+	try items.append(allocator, .{ .label = "Memory, Summary", .properties = summary_properties });
+	const rows = try conn.query(allocator, "SELECT DeviceLocator FROM Win32_PhysicalMemory", "ROOT\\CIMV2");
+	defer for (rows) |*row| row.deinit();
+	for (rows) |*row| {
+		const locator = try row.get(allocator, "DeviceLocator");
+		const label = if (locator.len == 0) "Memory, Module" else try std.mem.concat(allocator, u8, &.{ "Memory, ", locator });
+		const properties = try allocator.dupe(PropertyRow, &.{
+			.{ .name = "Bank", .value = "Loading..." },
+			.{ .name = "Type", .value = "Loading..." },
+			.{ .name = "Form Factor", .value = "Loading..." },
+			.{ .name = "Capacity", .value = "Loading..." },
+			.{ .name = "Rated Speed", .value = "Loading..." },
+			.{ .name = "Manufacturer", .value = "Loading..." },
+			.{ .name = "Voltage", .value = "Loading..." },
+			.{ .name = "Part Number", .value = "Loading..." },
+			.{ .name = "Serial Number", .value = "Loading..." },
+		});
+		try items.append(allocator, .{ .label = label, .properties = properties });
+	}
+	return items.toOwnedSlice(allocator);
+}
+
 pub fn getItems(allocator: std.mem.Allocator) ![]CategoryItem {
 	const conn = try wmi.WmiConnection.instance(std.heap.page_allocator);
 	var items = std.ArrayList(CategoryItem).empty;

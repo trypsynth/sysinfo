@@ -57,12 +57,11 @@ const ProviderResult = struct {
 	items: []CategoryItem = &.{},
 };
 
-// Shared by every not-yet-finished provider's placeholder category, a single static allocation reused as-is across every rebuild rather than re-created each time. Reusing the exact same slice (compared by .ptr in rebuildCategoriesFromCompleted) is what lets a placeholder that's still loading be told apart from one that just started real work, without one being mistaken for "changed" just because some *other* provider finished in the meantime.
-const loading_properties = [_]PropertyRow{.{ .name = "Status", .value = "Loading..." }};
-
-/// Runs on its own worker thread, one per provider (see startRefresh), so a provider stuck waiting on a slow or first-time-spun-up WMI namespace no longer blocks every other provider behind it, or the window from appearing at all. Errors are swallowed the same way the old sequential loop's `catch continue` did, just per provider now instead of process wide. `done` is set last, with a release store, so onTimerTick's acquire load on the UI thread is guaranteed to see `out.items` fully written by the time it observes `done == true`.
-fn runProviderThread(get_items: provider_registry.GetItemsFn, allocator: std.mem.Allocator, out: *ProviderResult, done: *bool) void {
-	out.items = get_items(allocator) catch &.{};
+/// Runs on its own worker thread, one per provider (see startRefresh). First runs the provider's cheap getShapes() and publishes its placeholder categories (real labels, "Loading..." values) as soon as those are known, then runs the slower getItems() for the real data. This means a provider stuck waiting on a slow or first-time-spun-up WMI namespace never blocks the window from appearing, never blocks any other provider, and still shows its own true category labels almost immediately rather than a generic stand-in. Errors are swallowed the same way the old sequential loop's `catch continue` did, just per provider now instead of process wide. Both `shapes_ready` and `done` are set last, with a release store, so onTimerTick's acquire loads on the UI thread are guaranteed to see the corresponding data fully written first.
+fn runProviderThread(provider: provider_registry.ProviderInfo, allocator: std.mem.Allocator, placeholders: *[]CategoryItem, shapes_ready: *bool, out: *ProviderResult, done: *bool) void {
+	placeholders.* = provider.get_shapes(allocator) catch &.{};
+	@atomicStore(bool, shapes_ready, true, .release);
+	out.items = provider.get_items(allocator) catch &.{};
 	@atomicStore(bool, done, true, .release);
 }
 
@@ -78,10 +77,14 @@ pub const MainWindow = struct {
 	arena: std.heap.ArenaAllocator,
 	// One dedicated arena per provider, each ever touched only by that provider's own worker thread, so no locking is needed. self.items (built in the combine arena above) borrows from these, so they're reset together with it at the start of every refresh, never independently.
 	provider_arenas: [provider_count]std.heap.ArenaAllocator = undefined,
+	// Each provider's placeholder categories (real labels, "Loading..." property values), published as soon as that provider's cheap getShapes() call returns, well before its full getItems() call finishes.
+	placeholders: [provider_count][]CategoryItem = undefined,
+	shapes_ready: [provider_count]bool = undefined,
 	results: [provider_count]ProviderResult = undefined,
 	provider_done: [provider_count]bool = undefined,
 	threads: [provider_count]?std.Thread = undefined,
-	// How many providers were done as of the last rebuild, so onTimerTick only touches the listbox when something has actually changed, not on every idle tick. Starts higher than provider_count could ever be so the very first tick (0 done) still counts as "changed" and paints the initial all-placeholders list.
+	// How many providers had shapes_ready/provider_done set as of the last rebuild, so onTimerTick only touches the listbox when something has actually changed, not on every idle tick. Both start higher than provider_count could ever be so the very first tick (nothing ready yet) still counts as "changed".
+	last_shapes_ready_count: usize = provider_count + 1,
 	last_done_count: usize = provider_count + 1,
 	refresh_timer_active: bool = false,
 	// The properties slice currently painted into properties_list, compared by .ptr against the selected category's properties each rebuild so the pane is only ever repainted (losing scroll position) when what it's showing actually changed, not just because some other category finished loading.
@@ -90,6 +93,8 @@ pub const MainWindow = struct {
 	pub fn init(instance: win32.HINSTANCE, backing_allocator: std.mem.Allocator) MainWindow {
 		var self: MainWindow = .{ .instance = instance, .arena = std.heap.ArenaAllocator.init(backing_allocator) };
 		for (&self.provider_arenas) |*provider_arena| provider_arena.* = std.heap.ArenaAllocator.init(backing_allocator);
+		for (&self.placeholders) |*p| p.* = &.{};
+		for (&self.shapes_ready) |*ready| ready.* = false;
 		for (&self.results) |*result| result.* = .{};
 		for (&self.provider_done) |*done| done.* = false;
 		for (&self.threads) |*t| t.* = null;
@@ -222,16 +227,19 @@ pub const MainWindow = struct {
 		_ = win32.SendMessageW(self.properties_list, win32.LB_RESETCONTENT, 0, 0);
 		_ = self.arena.reset(.retain_capacity);
 		self.items = &.{};
-		self.last_done_count = provider_count + 1; // never equal to a real done_count, so the first tick's all-placeholders state still counts as "changed" and gets painted
+		self.last_shapes_ready_count = provider_count + 1; // never equal to a real count, so the first tick still counts as "changed" even though nothing is ready yet
+		self.last_done_count = provider_count + 1;
 		self.rendered_properties = &.{};
+		for (&self.placeholders) |*p| p.* = &.{};
+		for (&self.shapes_ready) |*ready| ready.* = false;
 		for (&self.results) |*result| result.* = .{};
 		for (&self.provider_done) |*done| done.* = false;
-		for (provider_registry.providers, 0..) |get_items, i| {
+		for (provider_registry.providers, 0..) |provider, i| {
 			_ = self.provider_arenas[i].reset(.retain_capacity);
 			const provider_allocator = self.provider_arenas[i].allocator();
 			// If the thread pool is exhausted (very unlikely for 11 short-lived threads), fall back to running that one provider inline rather than dropping it.
-			self.threads[i] = std.Thread.spawn(.{}, runProviderThread, .{ get_items, provider_allocator, &self.results[i], &self.provider_done[i] }) catch blk: {
-				runProviderThread(get_items, provider_allocator, &self.results[i], &self.provider_done[i]);
+			self.threads[i] = std.Thread.spawn(.{}, runProviderThread, .{ provider, provider_allocator, &self.placeholders[i], &self.shapes_ready[i], &self.results[i], &self.provider_done[i] }) catch blk: {
+				runProviderThread(provider, provider_allocator, &self.placeholders[i], &self.shapes_ready[i], &self.results[i], &self.provider_done[i]);
 				break :blk null;
 			};
 		}
@@ -241,11 +249,14 @@ pub const MainWindow = struct {
 	}
 
 	fn onTimerTick(self: *MainWindow) void {
+		var shapes_ready_count: usize = 0;
 		var done_count: usize = 0;
-		for (&self.provider_done) |*done| {
-			if (@atomicLoad(bool, done, .acquire)) done_count += 1;
+		for (0..provider_count) |i| {
+			if (@atomicLoad(bool, &self.shapes_ready[i], .acquire)) shapes_ready_count += 1;
+			if (@atomicLoad(bool, &self.provider_done[i], .acquire)) done_count += 1;
 		}
-		if (done_count != self.last_done_count) {
+		if (shapes_ready_count != self.last_shapes_ready_count or done_count != self.last_done_count) {
+			self.last_shapes_ready_count = shapes_ready_count;
 			self.last_done_count = done_count;
 			self.rebuildCategoriesFromCompleted();
 		}
@@ -256,15 +267,15 @@ pub const MainWindow = struct {
 		}
 	}
 
-	/// Rebuilds the categories list from whichever providers have completed so far, standing in a placeholder category (loading_properties) for every provider that hasn't finished yet so the full set of categories is visible from the very first paint rather than trickling in one at a time. Only called when the completed count has actually changed (see onTimerTick), so the list doesn't flicker while a slow provider is still pending and nothing else has changed.
+	/// Rebuilds the categories list from whichever providers have completed so far, standing in each not-yet-finished provider's own placeholder categories (self.placeholders, published as soon as that provider's cheap getShapes() call returns) so the full set of categories, under their real eventual names, is visible from the very first paint rather than trickling in one at a time. Only called when the completed/shapes-ready counts have actually changed (see onTimerTick), so the list doesn't flicker while a slow provider is still pending and nothing else has changed.
 	fn rebuildCategoriesFromCompleted(self: *MainWindow) void {
 		const allocator = self.arena.allocator();
 		var collected = std.ArrayList(CategoryItem).empty;
 		for (0..provider_count) |i| {
 			if (@atomicLoad(bool, &self.provider_done[i], .acquire)) {
 				collected.appendSlice(allocator, self.results[i].items) catch continue;
-			} else {
-				collected.append(allocator, .{ .label = provider_registry.placeholder_labels[i], .properties = &loading_properties }) catch continue;
+			} else if (@atomicLoad(bool, &self.shapes_ready[i], .acquire)) {
+				collected.appendSlice(allocator, self.placeholders[i]) catch continue;
 			}
 		}
 		std.mem.sort(CategoryItem, collected.items, {}, struct {
