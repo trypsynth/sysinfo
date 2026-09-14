@@ -1,4 +1,4 @@
-// Port of src/wmi/{wmi_connection,wmi_row,wmi_date_time}.cpp, hand rolled COM bindings, no zigwin32.
+// Hand rolled COM bindings, no zigwin32.
 const std = @import("std");
 
 pub const HRESULT = i32;
@@ -196,7 +196,7 @@ pub const WmiRow = struct {
 			return std.mem.join(allocator, ", ", list);
 		}
 		if (v.vt == VT_BSTR) return bstrToUtf8(allocator, v.bstrVal());
-		// VariantChangeType renders VARIANT_BOOL as "-1"/"0", not readable text, so handle it explicitly like the C++ version does.
+		// VariantChangeType renders VARIANT_BOOL as "-1"/"0", not readable text, so handle it explicitly instead.
 		if (v.vt == VT_BOOL) return allocator.dupe(u8, if (v.boolVal() != 0) "True" else "False");
 		var dest: VARIANT = undefined;
 		VariantInit(&dest);
